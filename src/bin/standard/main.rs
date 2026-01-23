@@ -1,76 +1,46 @@
 #![forbid(unsafe_code)]
-#![allow(unused)]
+use std::any::Any;
 
 use rustorio::{
     self, Bundle, HandRecipe, Recipe, Resource, ResourceType, Tick,
-    buildings::{Assembler, Furnace, Lab},
+    buildings::{Assembler, Furnace},
     gamemodes::Standard,
-    recipes::{CopperSmelting, CopperWireRecipe, FurnaceRecipe, IronSmelting},
+    recipes::{CopperSmelting, CopperWireRecipe, IronSmelting},
     research::SteelTechnology,
     resources::{Copper, CopperOre, Iron, IronOre, Point},
     territory::{MINING_TICK_LENGTH, Miner, Territory},
 };
+
+mod scheduler;
+use scheduler::*;
 
 type GameMode = Standard;
 
 type StartingResources = <GameMode as rustorio::GameMode>::StartingResources;
 
 fn main() {
-    fn user_main(
-        mut tick: Tick,
-        starting_resources: StartingResources,
-    ) -> (Tick, Bundle<Point, 200>) {
+    fn user_main(tick: Tick, starting_resources: StartingResources) -> (Tick, Bundle<Point, 200>) {
         GameState::new(tick, starting_resources).play()
     }
     rustorio::play::<GameMode>(user_main);
 }
 
-trait RecipeSingleInput: Recipe<Inputs = (Resource<Self::SingleInput>,)> {
-    type SingleInput: ResourceType;
-}
-impl<I: ResourceType, R: Recipe<Inputs = (Resource<I>,)>> RecipeSingleInput for R {
-    type SingleInput = I;
-}
-
-trait RecipeSingleOutput: Recipe<Outputs = (Resource<Self::SingleOutput>,)> {
-    type SingleOutput: ResourceType;
-}
-impl<I: ResourceType, R: Recipe<Outputs = (Resource<I>,)>> RecipeSingleOutput for R {
-    type SingleOutput = I;
-}
-
 struct GameState {
     tick: Tick,
+
     iron_territory: Territory<IronOre>,
     copper_territory: Territory<CopperOre>,
+    #[expect(unused)]
     steel_technology: SteelTechnology,
+
     iron: Resource<Iron>,
+    #[expect(unused)]
     copper: Resource<Copper>,
+
     hand_iron_furnace: Option<Furnace<IronSmelting>>,
     hand_copper_furnace: Option<Furnace<CopperSmelting>>,
-}
 
-fn mine_and_smelt<const COUNT: u32, R>(
-    tick: &mut Tick,
-    territory: &mut Territory<R::SingleInput>,
-    furnace: &mut Furnace<R>,
-) -> Bundle<R::SingleOutput, COUNT>
-where
-    R: FurnaceRecipe + RecipeSingleInput + RecipeSingleOutput,
-{
-    let ore: Bundle<_, COUNT> = if territory.num_miners() == 0 {
-        territory.hand_mine(tick)
-    } else {
-        loop {
-            match territory.resources(tick).bundle() {
-                Ok(x) => break x,
-                Err(_) => tick.advance_by(MINING_TICK_LENGTH),
-            }
-        }
-    };
-    furnace.inputs(&tick).0.add(ore);
-    tick.advance_by(COUNT as u64 * R::TIME);
-    furnace.outputs(&tick).0.empty().bundle::<COUNT>().unwrap()
+    queue: WaiterQueue,
 }
 
 impl GameState {
@@ -82,38 +52,140 @@ impl GameState {
             steel_technology,
         } = starting_resources;
 
-        tick.log(true);
+        tick.log(false);
         GameState {
             tick,
+
             iron_territory,
             copper_territory,
             steel_technology,
+
             iron: iron.to_resource(),
             copper: Resource::new_empty(),
             hand_iron_furnace: Default::default(),
             hand_copper_furnace: Default::default(),
+
+            queue: Default::default(),
         }
     }
 
-    fn make_furnace<R: FurnaceRecipe>(&mut self, r: R) -> Furnace<R> {
-        let iron = self.iron.bundle().unwrap();
-        Furnace::build(&self.tick, r, iron)
+    fn tick(&mut self) {
+        self.tick.advance();
+        self.check_waiters();
+    }
+    fn advance_by(&mut self, t: u64) {
+        for _ in 0..t {
+            self.tick()
+        }
+        println!("{}", self.tick);
+    }
+    fn wait_for<R: Any>(&mut self, h: WakeHandle<R>) -> R {
+        loop {
+            if let Some(ret) = self.queue.get(h) {
+                println!("{}", self.tick);
+                break ret;
+            }
+            self.tick();
+        }
+    }
+
+    fn get_resource<const AMOUNT: u32, R: ResourceType + Any>(
+        &mut self,
+        f: impl Fn(&mut GameState) -> &mut Resource<R> + 'static,
+    ) -> WakeHandle<Bundle<R, AMOUNT>> {
+        struct W<const AMOUNT: u32, F>(F);
+        impl<const AMOUNT: u32, F, R: ResourceType + Any> Waiter for W<AMOUNT, F>
+        where
+            F: Fn(&mut GameState) -> &mut Resource<R>,
+        {
+            type Output = Bundle<R, AMOUNT>;
+            fn is_ready(&mut self, state: &mut GameState) -> bool {
+                (self.0)(state).amount() >= AMOUNT
+            }
+            fn wake(self, state: &mut GameState) -> Bundle<R, AMOUNT> {
+                (self.0)(state).bundle().unwrap()
+            }
+        }
+        self.enqueue_waiter(W(f))
+    }
+    fn get_iron_ore<const AMOUNT: u32, R: Any>(
+        &mut self,
+        f: impl FnOnce(&mut GameState, Bundle<IronOre, AMOUNT>) -> R + 'static,
+    ) -> WakeHandle<R> {
+        struct W<const AMOUNT: u32, F>(F);
+        impl<const AMOUNT: u32, F, R: Any> Waiter for W<AMOUNT, F>
+        where
+            F: FnOnce(&mut GameState, Bundle<IronOre, AMOUNT>) -> R,
+        {
+            type Output = R;
+            fn is_ready(&mut self, state: &mut GameState) -> bool {
+                state.iron_territory.resources(&state.tick).amount() >= AMOUNT
+            }
+            fn wake(self, state: &mut GameState) -> R {
+                let iron = state
+                    .iron_territory
+                    .resources(&state.tick)
+                    .bundle()
+                    .unwrap();
+                (self.0)(state, iron)
+            }
+        }
+
+        if self.iron_territory.num_miners() == 0 {
+            let ore = self.iron_territory.hand_mine(&mut self.tick);
+            let ret = f(self, ore);
+            self.queue.set_already_resolved_handle(ret)
+        } else {
+            self.enqueue_waiter(W(f))
+        }
     }
 
     fn mine_and_smelt_iron<const COUNT: u32>(&mut self) -> Bundle<Iron, COUNT> {
-        mine_and_smelt::<COUNT, _>(
-            &mut self.tick,
-            &mut self.iron_territory,
-            self.hand_iron_furnace.as_mut().unwrap(),
-        )
+        let h = self.get_iron_ore::<COUNT, _>(|_, ore| ore);
+        let ore = self.wait_for(h);
+        self.hand_iron_furnace
+            .as_mut()
+            .unwrap()
+            .inputs(&self.tick)
+            .0
+            .add(ore);
+        let h = self.get_resource(|state| {
+            &mut state
+                .hand_iron_furnace
+                .as_mut()
+                .unwrap()
+                .outputs(&state.tick)
+                .0
+        });
+        self.wait_for(h)
     }
 
     fn mine_and_smelt_copper<const COUNT: u32>(&mut self) -> Bundle<Copper, COUNT> {
-        mine_and_smelt::<COUNT, _>(
-            &mut self.tick,
-            &mut self.copper_territory,
-            self.hand_copper_furnace.as_mut().unwrap(),
-        )
+        let ore: Bundle<_, COUNT> = if self.copper_territory.num_miners() == 0 {
+            self.copper_territory.hand_mine(&mut self.tick)
+        } else {
+            loop {
+                match self.copper_territory.resources(&mut self.tick).bundle() {
+                    Ok(x) => break x,
+                    Err(_) => self.advance_by(MINING_TICK_LENGTH),
+                }
+            }
+        };
+        self.hand_copper_furnace
+            .as_mut()
+            .unwrap()
+            .inputs(&self.tick)
+            .0
+            .add(ore);
+        self.advance_by(COUNT as u64 * CopperSmelting::TIME);
+        self.hand_copper_furnace
+            .as_mut()
+            .unwrap()
+            .outputs(&self.tick)
+            .0
+            .empty()
+            .bundle::<COUNT>()
+            .unwrap()
     }
 
     fn play(mut self) -> (Tick, Bundle<Point, 200>) {
@@ -126,15 +198,17 @@ impl GameState {
         let iron = self.mine_and_smelt_iron();
         let copper = self.mine_and_smelt_copper();
         self.iron_territory
-            .add_miner(&self.tick, Miner::build(iron, copper));
+            .add_miner(&self.tick, Miner::build(iron, copper))
+            .unwrap();
 
         let iron = self.mine_and_smelt_iron();
         let copper = self.mine_and_smelt_copper();
         self.copper_territory
-            .add_miner(&self.tick, Miner::build(iron, copper));
+            .add_miner(&self.tick, Miner::build(iron, copper))
+            .unwrap();
 
         let mut copper_wire = Resource::new_empty();
-        for i in 0..6 {
+        for _ in 0..6 {
             let copper = self.mine_and_smelt_copper();
             copper_wire += CopperWireRecipe::craft(&mut self.tick, (copper,))
                 .0
@@ -152,11 +226,10 @@ impl GameState {
         let copper =
             self.mine_and_smelt_copper::<{ CopperWireRecipe::INPUT_AMOUNTS.0 * NUM_WIRE_CYCLES }>();
         assembler.inputs(&self.tick).0.add(copper);
-        self.tick
-            .advance_by(CopperWireRecipe::TIME * NUM_WIRE_CYCLES as u64);
+        self.advance_by(CopperWireRecipe::TIME * NUM_WIRE_CYCLES as u64);
         let copper_wire = assembler.outputs(&self.tick).0.empty().bundle().unwrap();
         let iron = self.mine_and_smelt_iron();
-        let mut assembler2 = Assembler::build(&self.tick, CopperWireRecipe, copper_wire, iron);
+        let _assembler2 = Assembler::build(&self.tick, CopperWireRecipe, copper_wire, iron);
 
         // let iron = self.mine_and_smelt_iron();
         // let copper = self.mine_and_smelt_copper();
