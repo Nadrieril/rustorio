@@ -1,11 +1,12 @@
 #![forbid(unsafe_code)]
 use std::any::Any;
 
+use itertools::Itertools;
 use rustorio::{
     self, Bundle, HandRecipe, Recipe, Resource, ResourceType, Tick,
     buildings::{Assembler, Furnace},
     gamemodes::Standard,
-    recipes::{CopperSmelting, CopperWireRecipe, IronSmelting},
+    recipes::{CopperSmelting, CopperWireRecipe, FurnaceRecipe, IronSmelting},
     research::SteelTechnology,
     resources::{Copper, CopperOre, Iron, IronOre, Point},
     territory::{Miner, Territory},
@@ -168,64 +169,101 @@ impl GameState {
     }
 
     fn mine_and_smelt_iron<const COUNT: u32>(&mut self) -> WakeHandle<Bundle<Iron, COUNT>> {
+        match self.iron.bundle() {
+            Ok(x) => return self.queue.set_already_resolved_handle(x),
+            Err(_) => {}
+        }
         let h = self.get_iron_ore();
         self.then(h, |state, ore| state.smelt_iron(ore))
     }
-
     fn mine_and_smelt_copper<const COUNT: u32>(&mut self) -> WakeHandle<Bundle<Copper, COUNT>> {
         let h = self.get_copper_ore();
         self.then(h, |state, ore| state.smelt_copper(ore))
     }
 
+    fn make_furnace<R: FurnaceRecipe + Any>(&mut self, r: R) -> WakeHandle<Furnace<R>> {
+        let iron = self.mine_and_smelt_iron();
+        self.then(iron, |state, iron| {
+            let furnace = Furnace::build(&state.tick, r, iron);
+            state.queue.set_already_resolved_handle(furnace)
+        })
+    }
+
+    fn make_miner(&mut self) -> WakeHandle<Miner> {
+        let iron = self.mine_and_smelt_iron();
+        let copper = self.mine_and_smelt_copper();
+        let both = self.pair(iron, copper);
+        self.then(both, |state, (iron, copper)| {
+            let miner = Miner::build(iron, copper);
+            state.queue.set_already_resolved_handle(miner)
+        })
+    }
+    fn add_iron_miner(&mut self) -> WakeHandle<()> {
+        let miner = self.make_miner();
+        self.then(miner, |state, miner| {
+            state.iron_territory.add_miner(&state.tick, miner).unwrap();
+            state.queue.set_already_resolved_handle(())
+        })
+    }
+    fn add_copper_miner(&mut self) -> WakeHandle<()> {
+        let miner = self.make_miner();
+        self.then(miner, |state, miner| {
+            state
+                .copper_territory
+                .add_miner(&state.tick, miner)
+                .unwrap();
+            state.queue.set_already_resolved_handle(())
+        })
+    }
+
     fn play(mut self) -> (Tick, Bundle<Point, 200>) {
-        let iron = self.iron.bundle().unwrap();
-        self.hand_iron_furnace = Some(Furnace::build(&self.tick, IronSmelting, iron));
+        let furnace = self.make_furnace(IronSmelting);
+        let furnace = self.wait_for(furnace);
+        self.hand_iron_furnace = Some(furnace);
+
+        let furnace = self.make_furnace(CopperSmelting);
+        let furnace = self.wait_for(furnace);
+        self.hand_copper_furnace = Some(furnace);
+
+        self.add_iron_miner();
+        self.add_copper_miner();
 
         let iron = self.mine_and_smelt_iron();
-        let iron = self.wait_for(iron);
-        self.hand_copper_furnace = Some(Furnace::build(&self.tick, CopperSmelting, iron));
-
-        let iron = self.mine_and_smelt_iron();
-        let copper = self.mine_and_smelt_copper();
-        let iron = self.wait_for(iron);
-        let copper = self.wait_for(copper);
-        self.iron_territory
-            .add_miner(&self.tick, Miner::build(iron, copper))
-            .unwrap();
-
-        let iron = self.mine_and_smelt_iron();
-        let copper = self.mine_and_smelt_copper();
-        let iron = self.wait_for(iron);
-        let copper = self.wait_for(copper);
-        self.copper_territory
-            .add_miner(&self.tick, Miner::build(iron, copper))
-            .unwrap();
-
-        let mut copper_wire = Resource::new_empty();
-        for _ in 0..6 {
-            let copper = self.mine_and_smelt_copper();
-            let copper = self.wait_for(copper);
-            copper_wire += CopperWireRecipe::craft(&mut self.tick, (copper,))
-                .0
-                .to_resource();
-        }
-        let iron = self.mine_and_smelt_iron();
-        let iron = self.wait_for(iron);
-        let mut assembler = Assembler::build(
-            &self.tick,
-            CopperWireRecipe,
-            copper_wire.bundle().unwrap(),
-            iron,
-        );
+        let wire_bundles = (0..6)
+            .into_iter()
+            .map(|_| {
+                let copper = self.mine_and_smelt_copper::<1>();
+                self.then(copper, |state, copper| {
+                    let wire = CopperWireRecipe::craft(&mut state.tick, (copper,)).0;
+                    state.queue.set_already_resolved_handle(wire)
+                })
+            })
+            .collect_vec();
+        let wire_bundles = self.join(wire_bundles);
+        let both = self.pair(wire_bundles, iron);
+        let assembler = self.then(both, |state, (wire_bundles, iron)| {
+            let mut copper_wire = Resource::new_empty();
+            for bundle in wire_bundles {
+                copper_wire += bundle.to_resource();
+            }
+            let assembler = Assembler::build(
+                &state.tick,
+                CopperWireRecipe,
+                copper_wire.bundle().unwrap(),
+                iron,
+            );
+            state.queue.set_already_resolved_handle(assembler)
+        });
+        let mut assembler = self.wait_for(assembler);
 
         const NUM_WIRE_CYCLES: u32 = 6;
         let copper =
             self.mine_and_smelt_copper::<{ CopperWireRecipe::INPUT_AMOUNTS.0 * NUM_WIRE_CYCLES }>();
+        let iron = self.mine_and_smelt_iron();
         let copper = self.wait_for(copper);
         assembler.inputs(&self.tick).0.add(copper);
         self.advance_by(CopperWireRecipe::TIME * NUM_WIRE_CYCLES as u64);
         let copper_wire = assembler.outputs(&self.tick).0.empty().bundle().unwrap();
-        let iron = self.mine_and_smelt_iron();
         let iron = self.wait_for(iron);
         let _assembler2 = Assembler::build(&self.tick, CopperWireRecipe, copper_wire, iron);
 

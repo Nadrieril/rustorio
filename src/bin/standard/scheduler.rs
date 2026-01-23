@@ -100,6 +100,12 @@ impl WaiterQueue {
             _ => None,
         }
     }
+    pub fn is_ready<T: Any>(&mut self, h: WakeHandle<T>) -> bool {
+        match self.waiters.get(&h.0) {
+            Some(WaiterState::Done(_)) => true,
+            _ => false,
+        }
+    }
     /// Gets the value returned by the waiter if it is done. This moves the value out.
     pub fn get<T: Any>(&mut self, h: WakeHandle<T>) -> Option<T> {
         match self.waiters.entry(h.0) {
@@ -113,7 +119,7 @@ impl WaiterQueue {
                 }
                 WaiterState::Dummy => unreachable!(),
             },
-            Entry::Vacant(_) => None,
+            Entry::Vacant(_) => panic!("the value has been taken already"),
         }
     }
 
@@ -186,5 +192,53 @@ impl GameState {
             }
         }
         self.enqueue_waiter(W::First(h, Some(f)))
+    }
+
+    /// Joins the results of two handles together.
+    pub fn pair<T: Any, U: Any>(
+        &mut self,
+        x: WakeHandle<T>,
+        y: WakeHandle<U>,
+    ) -> WakeHandle<(T, U)> {
+        struct W<T, U>(WakeHandle<T>, WakeHandle<U>);
+        impl<T: Any, U: Any> Waiter for W<T, U> {
+            type Output = (T, U);
+            fn is_ready(&mut self, state: &mut GameState) -> bool {
+                let Self(x, y) = *self;
+                let _ = state.check_waiter(x.0);
+                let _ = state.check_waiter(y.0);
+                state.queue.is_ready(x) && state.queue.is_ready(y)
+            }
+            fn wake(self, state: &mut GameState) -> (T, U) {
+                let Self(x, y) = self;
+                (state.queue.get(x).unwrap(), state.queue.get(y).unwrap())
+            }
+        }
+        self.enqueue_waiter(W(x, y))
+    }
+
+    /// Joins the results of two handles together.
+    pub fn join<T: Any>(&mut self, handles: Vec<WakeHandle<T>>) -> WakeHandle<Vec<T>> {
+        struct W<T>(Vec<WakeHandle<T>>);
+        impl<T: Any> Waiter for W<T> {
+            type Output = Vec<T>;
+            fn is_ready(&mut self, state: &mut GameState) -> bool {
+                let mut all_ready = true;
+                for h in self.0.iter() {
+                    let _ = state.check_waiter(h.0);
+                    if !state.queue.is_ready(*h) {
+                        all_ready = false
+                    }
+                }
+                all_ready
+            }
+            fn wake(self, state: &mut GameState) -> Vec<T> {
+                self.0
+                    .into_iter()
+                    .map(|h| state.queue.get(h).unwrap())
+                    .collect()
+            }
+        }
+        self.enqueue_waiter(W(handles))
     }
 }
