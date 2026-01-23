@@ -103,6 +103,7 @@ dependencies = [
 name = "rustorio-game"
 version = "0.1.0"
 dependencies = [
+ "indexmap",
  "itertools",
  "rustorio",
 ]

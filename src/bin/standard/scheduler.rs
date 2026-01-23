@@ -1,10 +1,6 @@
-use std::{
-    any::Any,
-    collections::{HashMap, hash_map::Entry},
-    marker::PhantomData,
-    mem,
-};
+use std::{any::Any, marker::PhantomData, mem};
 
+use indexmap::{IndexMap, map::Entry};
 use itertools::Itertools;
 
 use crate::GameState;
@@ -75,7 +71,7 @@ impl WaiterState {
 #[derive(Default)]
 pub struct WaiterQueue {
     next_handle: WakeHandleId,
-    waiters: HashMap<WakeHandleId, WaiterState>,
+    waiters: IndexMap<WakeHandleId, WaiterState>,
 }
 
 impl WaiterQueue {
@@ -98,7 +94,6 @@ impl WaiterQueue {
         WakeHandle(h, PhantomData)
     }
     /// Get the value returned by the waiter if it is done.
-    #[expect(unused)]
     pub fn get_ref<T: Any>(&mut self, h: WakeHandle<T>) -> Option<&T> {
         match self.waiters.get(&h.0) {
             Some(WaiterState::Done(x)) => Some(x.downcast_ref().unwrap()),
@@ -111,7 +106,7 @@ impl WaiterQueue {
             Entry::Occupied(entry) => match entry.get() {
                 WaiterState::Waiting(_) => None,
                 WaiterState::Done(_) => {
-                    let WaiterState::Done(x) = entry.remove() else {
+                    let WaiterState::Done(x) = entry.shift_remove() else {
                         unreachable!()
                     };
                     Some(*x.downcast().unwrap())
@@ -137,10 +132,14 @@ impl WaiterQueue {
 impl GameState {
     pub fn check_waiters(&mut self) {
         for handle in self.queue.waiters_to_check() {
-            let mut waiter = mem::take(self.queue.waiters.get_mut(&handle).unwrap());
-            waiter.maybe_wake(self);
-            *self.queue.waiters.get_mut(&handle).unwrap() = waiter;
+            self.check_waiter(handle);
         }
+    }
+    fn check_waiter(&mut self, handle: WakeHandleId) -> Option<()> {
+        let mut waiter = mem::take(self.queue.waiters.get_mut(&handle)?);
+        waiter.maybe_wake(self);
+        *self.queue.waiters.get_mut(&handle).unwrap() = waiter;
+        Some(())
     }
     pub fn enqueue_waiter<W: Waiter + 'static>(&mut self, mut w: W) -> WakeHandle<W::Output> {
         if w.is_ready(self) {
@@ -149,5 +148,43 @@ impl GameState {
         } else {
             self.queue.enqueue_waiter(w)
         }
+    }
+
+    /// Schedules `f` to run after `h` completes, and returns a hendl to the final output.
+    pub fn then<T: Any, U: Any>(
+        &mut self,
+        h: WakeHandle<T>,
+        f: impl FnOnce(&mut GameState, T) -> WakeHandle<U> + 'static,
+    ) -> WakeHandle<U> {
+        enum W<F, T, U> {
+            First(WakeHandle<T>, Option<F>),
+            Second(WakeHandle<U>),
+        }
+        impl<F, T: Any, U: Any> Waiter for W<F, T, U>
+        where
+            F: FnOnce(&mut GameState, T) -> WakeHandle<U>,
+        {
+            type Output = U;
+            fn is_ready(&mut self, state: &mut GameState) -> bool {
+                if let W::First(h, f) = self
+                    && let _ = state.check_waiter(h.0)
+                    && let Some(v) = state.queue.get(*h)
+                {
+                    let f = mem::take(f).unwrap();
+                    *self = W::Second(f(state, v));
+                }
+                if let W::Second(h) = self {
+                    state.check_waiter(h.0);
+                    state.queue.get_ref(*h).is_some()
+                } else {
+                    false
+                }
+            }
+            fn wake(self, state: &mut GameState) -> U {
+                let W::Second(h) = self else { unreachable!() };
+                state.queue.get(h).unwrap()
+            }
+        }
+        self.enqueue_waiter(W::First(h, Some(f)))
     }
 }
