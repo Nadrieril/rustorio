@@ -97,6 +97,11 @@ pub struct WaiterQueue {
 }
 
 impl WaiterQueue {
+    pub fn is_all_done(&self) -> bool {
+        self.waiters
+            .iter()
+            .all(|(_, w)| matches!(w, WaiterState::Done(..)))
+    }
     fn next_handle_id(&mut self) -> WakeHandleId {
         let h = self.next_handle;
         self.next_handle = WakeHandleId(h.0 + 1);
@@ -320,7 +325,6 @@ impl GameState {
         self.enqueue_waiter(W(x, y))
     }
 
-    #[expect(unused)]
     pub fn triple<T: Any, U: Any, V: Any>(
         &mut self,
         x: WakeHandle<T>,

@@ -10,10 +10,10 @@ use rustorio::{
     gamemodes::Standard,
     recipes::{
         AssemblerRecipe, CopperSmelting, CopperWireRecipe, ElectronicCircuitRecipe, FurnaceRecipe,
-        IronSmelting, RedScienceRecipe,
+        IronSmelting, PointRecipe, RedScienceRecipe, SteelSmelting,
     },
-    research::{RedScience, SteelTechnology},
-    resources::{Copper, CopperOre, CopperWire, ElectronicCircuit, Iron, IronOre, Point},
+    research::{PointsTechnology, RedScience, SteelTechnology},
+    resources::{Copper, CopperOre, CopperWire, ElectronicCircuit, Iron, IronOre, Point, Steel},
     territory::{Miner, Territory},
 };
 use rustorio_engine::research::TechRecipe;
@@ -41,15 +41,43 @@ struct GameState {
 struct Resources {
     iron_territory: Territory<IronOre>,
     copper_territory: Territory<CopperOre>,
+
     steel_technology: Option<SteelTechnology>,
+    points_technology: Option<PointsTechnology>,
+    steel_smelting: Option<SteelSmelting>,
+    points_recipe: Option<PointRecipe>,
 
     iron: Resource<Iron>,
 
-    iron_furnace: Option<Furnace<IronSmelting>>,
-    copper_furnace: Option<Furnace<CopperSmelting>>,
-    copper_wire_assembler: Option<Assembler<CopperWireRecipe>>,
-    elec_circuit_assembler: Option<Assembler<ElectronicCircuitRecipe>>,
-    steel_lab: Option<Lab<SteelTechnology>>,
+    iron_furnace: MachineStorage<Furnace<IronSmelting>>,
+    copper_furnace: MachineStorage<Furnace<CopperSmelting>>,
+    steel_furnace: MachineStorage<Furnace<SteelSmelting>>,
+    copper_wire_assembler: MachineStorage<Assembler<CopperWireRecipe>>,
+    elec_circuit_assembler: MachineStorage<Assembler<ElectronicCircuitRecipe>>,
+    points_assembler: MachineStorage<Assembler<PointRecipe>>,
+    steel_lab: MachineStorage<Lab<SteelTechnology>>,
+    points_lab: MachineStorage<Lab<PointsTechnology>>,
+}
+
+#[derive(Default)]
+enum MachineStorage<M> {
+    /// The machine isn't there; craft by hand.
+    #[default]
+    NoMachine,
+    /// The machine is there.
+    Present(M),
+}
+
+impl<M> MachineStorage<M> {
+    fn is_present(&self) -> bool {
+        matches!(self, Self::Present(_))
+    }
+    fn as_mut(&mut self) -> &mut M {
+        match self {
+            Self::Present(m) => m,
+            _ => panic!(),
+        }
+    }
 }
 
 impl GameState {
@@ -68,14 +96,21 @@ impl GameState {
             resources: Resources {
                 iron_territory,
                 copper_territory,
+
                 steel_technology: Some(steel_technology),
+                points_technology: Default::default(),
+                steel_smelting: Default::default(),
+                points_recipe: Default::default(),
 
                 iron: iron.to_resource(),
                 iron_furnace: Default::default(),
                 copper_furnace: Default::default(),
+                steel_furnace: Default::default(),
                 copper_wire_assembler: Default::default(),
                 elec_circuit_assembler: Default::default(),
+                points_assembler: Default::default(),
                 steel_lab: Default::default(),
+                points_lab: Default::default(),
             },
         }
     }
@@ -96,6 +131,15 @@ impl GameState {
             if let Some(ret) = self.queue.get(h) {
                 println!("{}", self.tick);
                 return ret;
+            }
+            self.tick();
+        }
+    }
+    fn complete_all(&mut self) {
+        loop {
+            if self.queue.is_all_done() {
+                println!("{}", self.tick);
+                return;
             }
             self.tick();
         }
@@ -224,7 +268,7 @@ impl GameState {
     /// Given a producer of a single bundle of an item, make a producer of a larger bundle.
     fn multiple<const SINGLE: u32, const COUNT: u32, R: ResourceType + Any>(
         &mut self,
-        f: fn(&mut GameState) -> WakeHandle<Bundle<R, SINGLE>>,
+        f: impl Fn(&mut GameState) -> WakeHandle<Bundle<R, SINGLE>>,
     ) -> WakeHandle<Bundle<R, COUNT>> {
         assert_eq!(COUNT.rem_euclid(SINGLE), 0);
         let singles = (0..COUNT / SINGLE).map(|_| f(self)).collect_vec();
@@ -236,20 +280,20 @@ impl GameState {
     fn craft<const N: u32, R, M, O>(
         &mut self,
         inputs: R::BundledInputs,
-        f: fn(&mut Resources) -> &mut Option<M>,
+        f: fn(&mut Resources) -> &mut MachineStorage<M>,
     ) -> WakeHandle<O>
     where
         R: ConstRecipe<N, BundledOutputs = (O,)> + Any,
         M: Machine<R> + Any,
         O: Any,
     {
-        let machine_ready = self.wait_until(move |s| f(&mut s.resources).is_some());
+        let machine_ready = self.wait_until(move |s| f(&mut s.resources).is_present());
         self.then(machine_ready, move |state, _| {
-            let machine = f(&mut state.resources).as_mut().unwrap();
+            let machine = f(&mut state.resources).as_mut();
             let machine_inputs = machine.inputs(&state.tick);
             R::add_inputs(machine_inputs, inputs);
             let out = state.wait_for(move |state| {
-                let machine = f(&mut state.resources).as_mut().unwrap();
+                let machine = f(&mut state.resources).as_mut();
                 R::get_outputs(&mut machine.outputs(&state.tick))
             });
             state.map(out, |_, out| out.0)
@@ -260,7 +304,7 @@ impl GameState {
     fn craft1<R, M, I, O>(
         &mut self,
         input: I,
-        f: fn(&mut Resources) -> &mut Option<M>,
+        f: fn(&mut Resources) -> &mut MachineStorage<M>,
     ) -> WakeHandle<O>
     where
         R: ConstRecipe<1, BundledInputs = (I,), BundledOutputs = (O,)> + Any,
@@ -268,6 +312,17 @@ impl GameState {
         O: Any,
     {
         self.craft((input,), f)
+    }
+
+    fn add_machine<M: Any>(
+        &mut self,
+        machine_storage: fn(&mut Resources) -> &mut MachineStorage<M>,
+        make_machine: impl FnOnce(&mut GameState) -> WakeHandle<M>,
+    ) -> WakeHandle<()> {
+        let machine = make_machine(self);
+        self.map(machine, move |state, machine| {
+            *machine_storage(&mut state.resources) = MachineStorage::Present(machine);
+        })
     }
 }
 
@@ -294,50 +349,50 @@ impl GameState {
             if let Ok(x) = state.resources.iron.bundle() {
                 return state.nowait(x);
             } else {
-                let h = state.iron_ore();
-                state.then(h, |state, ore| {
+                let ore = state.iron_ore();
+                state.then(ore, |state, ore| {
                     state.craft1(ore, |resources| &mut resources.iron_furnace)
                 })
             }
         })
     }
-
     fn copper<const COUNT: u32>(&mut self) -> WakeHandle<Bundle<Copper, COUNT>> {
         self.multiple(|state| {
-            let h = state.copper_ore();
-            state.then(h, |state, ore| {
+            let ore = state.copper_ore();
+            state.then(ore, |state, ore| {
                 state.craft1(ore, |resources| &mut resources.copper_furnace)
             })
         })
     }
-
-    fn furnace<R: FurnaceRecipe + Any>(&mut self, r: R) -> WakeHandle<Furnace<R>> {
-        let iron = self.iron();
-        self.map(iron, |state, iron| Furnace::build(&state.tick, r, iron))
-    }
-    fn add_furnace<R: FurnaceRecipe + Any>(
-        &mut self,
-        r: R,
-        f: fn(&mut Resources) -> &mut Option<Furnace<R>>,
-    ) -> WakeHandle<()> {
-        let furnace = self.furnace(r);
-        self.map(furnace, move |state, furnace| {
-            *f(&mut state.resources) = Some(furnace);
+    fn steel<const COUNT: u32>(&mut self) -> WakeHandle<Bundle<Steel, COUNT>> {
+        self.multiple(|state| {
+            let iron = state.iron();
+            state.then(iron, |state, ore| {
+                state.craft1(ore, |resources| &mut resources.steel_furnace)
+            })
         })
     }
 
-    fn miner(&mut self) -> WakeHandle<Miner> {
-        let iron = self.iron();
-        let copper = self.copper();
-        let both = self.pair(iron, copper);
-        self.map(both, |_state, (iron, copper)| Miner::build(iron, copper))
+    fn add_furnace<R: FurnaceRecipe + Any>(
+        &mut self,
+        r: R,
+        f: fn(&mut Resources) -> &mut MachineStorage<Furnace<R>>,
+    ) -> WakeHandle<()> {
+        self.add_machine(f, |state| {
+            let iron = state.iron();
+            state.map(iron, |state, iron| Furnace::build(&state.tick, r, iron))
+        })
     }
+
     fn add_miner<R: ResourceType + Any>(
         &mut self,
         f: fn(&mut Resources) -> &mut Territory<R>,
     ) -> WakeHandle<()> {
-        let miner = self.miner();
-        self.map(miner, move |state, miner| {
+        let iron = self.iron();
+        let copper = self.copper();
+        let both = self.pair(iron, copper);
+        self.map(both, move |state, (iron, copper)| {
+            let miner = Miner::build(iron, copper);
             f(&mut state.resources)
                 .add_miner(&state.tick, miner)
                 .unwrap();
@@ -348,7 +403,7 @@ impl GameState {
         self.multiple(|state| {
             let copper = state.copper();
             state.then(copper, |state, copper| {
-                if state.resources.copper_wire_assembler.is_some() {
+                if state.resources.copper_wire_assembler.is_present() {
                     state.craft1(copper, |resources| &mut resources.copper_wire_assembler)
                 } else {
                     let out = CopperWireRecipe::craft(&mut state.tick, (copper,)).0;
@@ -358,42 +413,35 @@ impl GameState {
         })
     }
 
-    fn assembler<R: AssemblerRecipe + Any>(&mut self, r: R) -> WakeHandle<Assembler<R>> {
-        let iron = self.iron();
-        let copper_wire = self.copper_wire();
-        let both = self.pair(copper_wire, iron);
-        self.map(both, |state, (copper_wire, iron)| {
-            Assembler::build(&state.tick, r, copper_wire, iron)
-        })
-    }
     fn add_assembler<R: AssemblerRecipe + Any>(
         &mut self,
         r: R,
-        f: fn(&mut Resources) -> &mut Option<Assembler<R>>,
+        f: fn(&mut Resources) -> &mut MachineStorage<Assembler<R>>,
     ) -> WakeHandle<()> {
-        let assembler = self.assembler(r);
-        self.map(assembler, move |state, assembler| {
-            *f(&mut state.resources) = Some(assembler);
+        self.add_machine(f, |state| {
+            let iron = state.iron();
+            let copper_wire = state.copper_wire();
+            let both = state.pair(copper_wire, iron);
+            state.map(both, |state, (copper_wire, iron)| {
+                Assembler::build(&state.tick, r, copper_wire, iron)
+            })
         })
     }
 
-    fn lab<T: Technology + Any>(&mut self, get_tech: fn(&Resources) -> &T) -> WakeHandle<Lab<T>> {
-        let iron = self.iron();
-        let copper = self.copper();
-        let both = self.pair(iron, copper);
-        self.map(both, move |state, (iron, copper)| {
-            let tech = get_tech(&state.resources);
-            Lab::build(&state.tick, tech, iron, copper)
-        })
-    }
     fn add_lab<T: Technology + Any>(
         &mut self,
-        get_tech: fn(&Resources) -> &T,
-        f: fn(&mut Resources) -> &mut Option<Lab<T>>,
+        get_tech: fn(&Resources) -> &Option<T>,
+        f: fn(&mut Resources) -> &mut MachineStorage<Lab<T>>,
     ) -> WakeHandle<()> {
-        let lab = self.lab(get_tech);
-        self.map(lab, move |state, lab| {
-            *f(&mut state.resources) = Some(lab);
+        self.add_machine(f, |state| {
+            let iron = state.iron();
+            let copper = state.copper();
+            let tech_ready = state.wait_until(move |state| get_tech(&state.resources).is_some());
+            let triple = state.triple(tech_ready, iron, copper);
+            state.map(triple, move |state, (_, iron, copper)| {
+                let tech = get_tech(&state.resources).as_ref().unwrap();
+                Lab::build(&state.tick, tech, iron, copper)
+            })
         })
     }
 
@@ -413,19 +461,36 @@ impl GameState {
             let iron = state.iron();
             let circuit = state.circuit();
             let both = state.pair(iron, circuit);
-            state.map(both, |state, (copper_wire, iron)| {
-                RedScienceRecipe::craft(&mut state.tick, (copper_wire, iron)).0
+            state.map(both, |state, (iron, circuit)| {
+                RedScienceRecipe::craft(&mut state.tick, (iron, circuit)).0
             })
         })
     }
 
-    fn steel_tech_points<const COUNT: u32>(
+    fn red_science_tech<const COUNT: u32, T: Technology + Any>(
         &mut self,
-    ) -> WakeHandle<Bundle<ResearchPoint<SteelTechnology>, COUNT>> {
-        self.multiple(|state| {
+        lab: fn(&mut Resources) -> &mut MachineStorage<Lab<T>>,
+    ) -> WakeHandle<Bundle<ResearchPoint<T>, COUNT>>
+    where
+        TechRecipe<T>: ConstRecipe<
+                1,
+                BundledInputs = (Bundle<RedScience, 1>,),
+                BundledOutputs = (Bundle<ResearchPoint<T>, 1>,),
+            >,
+    {
+        self.multiple(move |state| {
             let science = state.red_science();
-            state.then(science, |state, science| {
-                state.craft1(science, |r| &mut r.steel_lab)
+            state.then(science, move |state, science| state.craft1(science, lab))
+        })
+    }
+
+    fn points<const COUNT: u32>(&mut self) -> WakeHandle<Bundle<Point, COUNT>> {
+        self.multiple(|state| {
+            let circuit = state.circuit();
+            let steel = state.steel();
+            let both = state.pair(circuit, steel);
+            state.then(both, |state, (circuit, steel)| {
+                state.craft((circuit, steel), |r| &mut r.points_assembler)
             })
         })
     }
@@ -437,24 +502,47 @@ impl GameState {
         let h = self.add_furnace(CopperSmelting, |r| &mut r.copper_furnace);
         self.complete(h);
 
-        let _ = self.add_miner(|r| &mut r.iron_territory);
-        let _ = self.add_miner(|r| &mut r.copper_territory);
+        self.add_miner(|r| &mut r.iron_territory);
+        self.add_miner(|r| &mut r.copper_territory);
 
         let h = self.add_assembler(CopperWireRecipe, |r| &mut r.copper_wire_assembler);
         self.complete(h);
 
         self.add_assembler(ElectronicCircuitRecipe, |r| &mut r.elec_circuit_assembler);
 
-        self.add_lab(
-            |r| r.steel_technology.as_ref().unwrap(),
-            |r| &mut r.steel_lab,
-        );
+        self.add_lab(|r| &r.steel_technology, |r| &mut r.steel_lab);
 
-        let h = self.steel_tech_points();
-        let research_points = self.complete(h);
-        let steel_tech = self.resources.steel_technology.take().unwrap();
-        let (_steel_smelting, _points_tech) = steel_tech.research(research_points);
+        let research_points = self.red_science_tech(|r| &mut r.steel_lab);
+        self.map(research_points, |state, research_points| {
+            let steel_tech = state.resources.steel_technology.take().unwrap();
+            let (steel_smelting, points_tech) = steel_tech.research(research_points);
+            state.resources.steel_smelting = Some(steel_smelting);
+            state.resources.points_technology = Some(points_tech);
+        });
 
+        let steel_smelting = self.wait_for(|st| st.resources.steel_smelting);
+        self.then(steel_smelting, |state, steel_smelting| {
+            state.add_furnace(steel_smelting, |r| &mut r.steel_furnace)
+        });
+
+        self.add_lab(|r| &r.points_technology, |r| &mut r.points_lab);
+
+        let research_points = self.red_science_tech(|r| &mut r.points_lab);
+        self.map(research_points, |state, research_points| {
+            let points_tech = state.resources.points_technology.take().unwrap();
+            let points_recipe = points_tech.research(research_points);
+            state.resources.points_recipe = Some(points_recipe);
+        });
+
+        let points_recipe = self.wait_for(|st| st.resources.points_recipe);
+        self.then(points_recipe, |state, points_recipe| {
+            state.add_assembler(points_recipe, |r| &mut r.points_assembler)
+        });
+
+        let _points = self.points::<10>();
+        self.complete_all();
         todo!("WIP: {}", self.tick.cur())
+        // let points = self.complete(points);
+        // (self.tick, points)
     }
 }
