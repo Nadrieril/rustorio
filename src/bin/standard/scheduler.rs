@@ -150,10 +150,36 @@ impl GameState {
     pub fn enqueue_waiter<W: Waiter + 'static>(&mut self, mut w: W) -> WakeHandle<W::Output> {
         if w.is_ready(self) {
             let ret = w.wake(self);
-            self.queue.set_already_resolved_handle(ret)
+            self.nowait(ret)
         } else {
             self.queue.enqueue_waiter(w)
         }
+    }
+    pub fn nowait<T: Any>(&mut self, x: T) -> WakeHandle<T> {
+        self.queue.set_already_resolved_handle(x)
+    }
+
+    pub fn map<T: Any, U: Any>(
+        &mut self,
+        h: WakeHandle<T>,
+        f: impl FnOnce(&mut GameState, T) -> U + 'static,
+    ) -> WakeHandle<U> {
+        struct W<F, T>(WakeHandle<T>, F);
+        impl<F, T: Any, U: Any> Waiter for W<F, T>
+        where
+            F: FnOnce(&mut GameState, T) -> U,
+        {
+            type Output = U;
+            fn is_ready(&mut self, state: &mut GameState) -> bool {
+                let _ = state.check_waiter(self.0.0);
+                state.queue.is_ready(self.0)
+            }
+            fn wake(self, state: &mut GameState) -> U {
+                let v = state.queue.get(self.0).unwrap();
+                (self.1)(state, v)
+            }
+        }
+        self.enqueue_waiter(W(h, f))
     }
 
     /// Schedules `f` to run after `h` completes, and returns a hendl to the final output.
@@ -217,8 +243,20 @@ impl GameState {
         self.enqueue_waiter(W(x, y))
     }
 
+    #[expect(unused)]
+    pub fn triple<T: Any, U: Any, V: Any>(
+        &mut self,
+        x: WakeHandle<T>,
+        y: WakeHandle<U>,
+        z: WakeHandle<V>,
+    ) -> WakeHandle<(T, U, V)> {
+        let xy = self.pair(x, y);
+        let xyz = self.pair(xy, z);
+        self.map(xyz, |_, ((x, y), z)| (x, y, z))
+    }
+
     /// Joins the results of two handles together.
-    pub fn join<T: Any>(&mut self, handles: Vec<WakeHandle<T>>) -> WakeHandle<Vec<T>> {
+    pub fn collect<T: Any>(&mut self, handles: Vec<WakeHandle<T>>) -> WakeHandle<Vec<T>> {
         struct W<T>(Vec<WakeHandle<T>>);
         impl<T: Any> Waiter for W<T> {
             type Output = Vec<T>;

@@ -106,6 +106,7 @@ dependencies = [
  "indexmap",
  "itertools",
  "rustorio",
+ "rustorio-engine",
 ]
 
 [[package]]
