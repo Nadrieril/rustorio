@@ -1,7 +1,12 @@
 #![forbid(unsafe_code)]
 #![feature(generic_const_exprs, try_trait_v2, never_type)]
 #![allow(incomplete_features)]
-use std::{any::Any, mem};
+use std::{
+    any::{Any, TypeId},
+    collections::{HashMap, VecDeque},
+    mem,
+    ops::Deref,
+};
 
 use itertools::Itertools;
 use rustorio::{
@@ -50,6 +55,8 @@ trait ConstRecipe<const INPUT_N: u32>: Recipe {
     type BundledOutputs;
     fn add_inputs(to: &mut Self::Inputs, i: Self::BundledInputs);
     fn get_outputs(from: &mut Self::Outputs) -> Option<Self::BundledOutputs>;
+    /// Count the number of recipe instances left in this input bundle.
+    fn input_load(input: &Self::Inputs) -> u32;
 }
 
 impl<R, I, O> ConstRecipe<1> for R
@@ -68,6 +75,9 @@ where
     }
     fn get_outputs(from: &mut Self::Outputs) -> Option<Self::BundledOutputs> {
         Some((from.0.bundle().ok()?,))
+    }
+    fn input_load(input: &Self::Inputs) -> u32 {
+        input.0.amount() / R::INPUT_AMOUNTS.0
     }
 }
 
@@ -94,12 +104,25 @@ where
     fn get_outputs(from: &mut Self::Outputs) -> Option<Self::BundledOutputs> {
         Some((from.0.bundle().ok()?,))
     }
+    fn input_load(input: &Self::Inputs) -> u32 {
+        input.0.amount() / R::INPUT_AMOUNTS.0
+    }
 }
 
 trait Machine {
     type Recipe: Recipe<Inputs: MachineInputs>;
     fn inputs(&mut self, tick: &Tick) -> &mut <Self::Recipe as Recipe>::Inputs;
     fn outputs(&mut self, tick: &Tick) -> &mut <Self::Recipe as Recipe>::Outputs;
+    /// Count the number of recipe instances left in this input bundle.
+    fn input_load<const N: u32>(&mut self, tick: &Tick) -> u32
+    where
+        Self::Recipe: ConstRecipe<N>,
+    {
+        Self::Recipe::input_load(self.inputs(tick))
+    }
+    fn type_name(&self) -> &str {
+        std::any::type_name::<Self>()
+    }
 }
 
 impl<R: FurnaceRecipe + Recipe<Inputs: MachineInputs>> Machine for Furnace<R> {
@@ -148,22 +171,67 @@ impl<R1: ResourceType, R2: ResourceType> MachineInputs for (Resource<R1>, Resour
     }
 }
 
+/// Wrapper to restrict mutable access.
+struct RestrictMut<T>(T);
+
+/// Must only be created when a tick is explicitly requested. Jobs which require mutable access to
+/// the `Tick` should enqueue themselves to `GameState.mut_tick_queue`.
+struct RestrictMutToken(());
+
+impl<T> RestrictMut<T> {
+    fn new(x: T) -> Self {
+        Self(x)
+    }
+    fn as_ref(&self) -> &T {
+        &self.0
+    }
+    fn as_mut(&mut self, _: RestrictMutToken) -> &mut T {
+        &mut self.0
+    }
+}
+impl<T> Deref for RestrictMut<T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
+        self.as_ref()
+    }
+}
+
 struct GameState {
-    tick: Tick,
+    tick: RestrictMut<Tick>,
+    /// Advancing time during the waiter updates risks skipping updates. So instead we require that
+    /// jobs which need mutable ownership of the `Tick` be put in a separate queue.
+    mut_tick_queue: VecDeque<Box<dyn FnOnce(&mut GameState, RestrictMutToken)>>,
     resources: Resources,
     queue: WaiterQueue,
 }
 
+/// A store of various resources.
+#[derive(Default)]
+pub struct ResourceStore {
+    /// Maps the type id of `R` to a `Box<Resource<R>>`.
+    map: HashMap<TypeId, Box<dyn Any>>,
+}
+impl ResourceStore {
+    pub fn get<R: ResourceType + Any>(&mut self) -> &mut Resource<R> {
+        self.map
+            .entry(TypeId::of::<R>())
+            .or_insert_with(|| Box::new(Resource::<R>::new_empty()))
+            .downcast_mut()
+            .unwrap()
+    }
+}
+
+#[derive(Default)]
 struct Resources {
-    iron_territory: Territory<IronOre>,
-    copper_territory: Territory<CopperOre>,
+    iron_territory: Option<Territory<IronOre>>,
+    copper_territory: Option<Territory<CopperOre>>,
 
     steel_technology: Option<SteelTechnology>,
     points_technology: Option<PointsTechnology>,
     steel_smelting: Option<SteelSmelting>,
     points_recipe: Option<PointRecipe>,
 
-    iron: Resource<Iron>,
+    resource_store: ResourceStore,
 
     iron_furnace: MachineStorage<Furnace<IronSmelting>>,
     copper_furnace: MachineStorage<Furnace<CopperSmelting>>,
@@ -202,6 +270,14 @@ impl<M> MachineStorage<M> {
             unreachable!()
         };
         vec.push(m);
+    }
+    fn iter(&mut self) -> impl Iterator<Item = &mut M> {
+        match self {
+            Self::Present(vec) => Some(vec),
+            _ => None,
+        }
+        .into_iter()
+        .flatten()
     }
 
     fn request(&mut self, tick: &Tick) -> Option<MachineId>
@@ -262,58 +338,88 @@ impl GameState {
         } = starting_resources;
 
         tick.log(false);
+        let mut resources = Resources::default();
+        resources.resource_store.get().add(iron);
+        resources.steel_technology = Some(steel_technology);
+        resources.iron_territory = Some(iron_territory);
+        resources.copper_territory = Some(copper_territory);
         GameState {
-            tick,
+            tick: RestrictMut::new(tick),
+            mut_tick_queue: Default::default(),
             queue: Default::default(),
-            resources: Resources {
-                iron_territory,
-                copper_territory,
-
-                steel_technology: Some(steel_technology),
-                points_technology: Default::default(),
-                steel_smelting: Default::default(),
-                points_recipe: Default::default(),
-
-                iron: iron.to_resource(),
-                iron_furnace: Default::default(),
-                copper_furnace: Default::default(),
-                steel_furnace: Default::default(),
-                copper_wire_assembler: Default::default(),
-                elec_circuit_assembler: Default::default(),
-                points_assembler: Default::default(),
-                steel_lab: Default::default(),
-                points_lab: Default::default(),
-            },
+            resources,
         }
     }
 
-    fn tick(&mut self) {
-        self.tick.advance();
+    fn tick(&self) -> &Tick {
+        &self.tick
+    }
+    /// Enqueue an operation that requires advancing the tick time. It will be executed inside
+    /// `tick_fwd` instead of plainly advancing the tick.
+    fn with_mut_tick(&mut self, f: impl FnOnce(&mut GameState, RestrictMutToken) + Any) {
+        self.mut_tick_queue.push_back(Box::new(f))
+    }
+    fn tick_fwd(&mut self) {
+        let mut_token = RestrictMutToken(());
+        if let Some(f) = self.mut_tick_queue.pop_front() {
+            f(self, mut_token)
+        } else {
+            self.tick.as_mut(mut_token).advance();
+        }
         self.check_waiters();
+        self.report_loads();
+    }
+    fn report_loads(&mut self) {
+        if true {
+            return;
+        }
+        let r = &mut self.resources;
+        macro_rules! max_load {
+            ($($m:ident,)*) => {
+                [$(
+                    r.$m
+                        .iter()
+                        .map(|m| (m.input_load(&self.tick), m.type_name()))
+                        .max(),
+                )*]
+            };
+        }
+        let loads = max_load!(
+            iron_furnace,
+            copper_furnace,
+            steel_furnace,
+            copper_wire_assembler,
+            elec_circuit_assembler,
+            points_assembler,
+            steel_lab,
+            points_lab,
+        );
+        let (max_load, name) = loads.iter().flatten().max().unwrap();
+        eprintln!("{}: a {name} has load {max_load}", self.tick.as_ref());
     }
     #[expect(unused)]
     fn advance_by(&mut self, t: u64) {
         for _ in 0..t {
-            self.tick()
+            self.tick_fwd()
         }
-        println!("{}", self.tick);
+        println!("{}", self.tick());
     }
     fn complete<R: Any>(&mut self, h: WakeHandle<R>) -> R {
         loop {
             if let Some(ret) = self.queue.get(h) {
-                println!("{}", self.tick);
+                println!("{}", self.tick());
                 return ret;
             }
-            self.tick();
+            self.tick_fwd();
         }
     }
     fn complete_all(&mut self) {
         loop {
             if self.queue.is_all_done() {
-                println!("{}", self.tick);
+                println!("{}", self.tick());
                 return;
             }
-            self.tick();
+            self.tick_fwd();
         }
     }
 }
@@ -405,26 +511,71 @@ impl GameState {
 }
 
 impl GameState {
+    fn hand_mine<Ore: ResourceType + Any>(
+        &mut self,
+        territory: fn(&mut Resources) -> &mut Territory<Ore>,
+    ) -> WakeHandle<Bundle<Ore, 1>> {
+        self.with_mut_tick(move |state, mut_token| {
+            let out: Bundle<Ore, 1> =
+                territory(&mut state.resources).hand_mine(state.tick.as_mut(mut_token));
+            state.resources.resource_store.get().add(out);
+        });
+        self.wait_for_resource(|state| state.resources.resource_store.get())
+    }
+    fn hand_craft<
+        const AMOUNT: u32,
+        R: HandRecipe<OutputBundle = (Bundle<O, AMOUNT>,)> + Any,
+        O: ResourceType + Any,
+    >(
+        &mut self,
+        inputs: R::InputBundle,
+    ) -> WakeHandle<Bundle<O, AMOUNT>> {
+        self.with_mut_tick(|state, mut_token| {
+            let out = R::craft(state.tick.as_mut(mut_token), inputs).0;
+            state.resources.resource_store.get().add(out);
+        });
+        self.wait_for_resource(|state| state.resources.resource_store.get())
+    }
+
     fn iron_ore(&mut self) -> WakeHandle<Bundle<IronOre, 1>> {
-        if self.resources.iron_territory.num_miners() == 0 {
-            let ore = self.resources.iron_territory.hand_mine(&mut self.tick);
-            self.nowait(ore)
+        if self.resources.iron_territory.as_ref().unwrap().num_miners() == 0 {
+            self.hand_mine(|r| r.iron_territory.as_mut().unwrap())
         } else {
-            self.wait_for_resource(|state| state.resources.iron_territory.resources(&state.tick))
+            self.wait_for_resource(|state| {
+                state
+                    .resources
+                    .iron_territory
+                    .as_mut()
+                    .unwrap()
+                    .resources(&state.tick)
+            })
         }
     }
     fn copper_ore(&mut self) -> WakeHandle<Bundle<CopperOre, 1>> {
-        if self.resources.copper_territory.num_miners() == 0 {
-            let ore = self.resources.copper_territory.hand_mine(&mut self.tick);
-            self.nowait(ore)
+        if self
+            .resources
+            .copper_territory
+            .as_ref()
+            .unwrap()
+            .num_miners()
+            == 0
+        {
+            self.hand_mine(|r| r.copper_territory.as_mut().unwrap())
         } else {
-            self.wait_for_resource(|state| state.resources.copper_territory.resources(&state.tick))
+            self.wait_for_resource(|state| {
+                state
+                    .resources
+                    .copper_territory
+                    .as_mut()
+                    .unwrap()
+                    .resources(&state.tick)
+            })
         }
     }
 
     fn iron<const COUNT: u32>(&mut self) -> WakeHandle<Bundle<Iron, COUNT>> {
         self.multiple(|state| {
-            if let Ok(x) = state.resources.iron.bundle() {
+            if let Ok(x) = state.resources.resource_store.get().bundle() {
                 return state.nowait(x);
             } else {
                 let ore = state.iron_ore();
@@ -464,7 +615,7 @@ impl GameState {
 
     fn add_miner<R: ResourceType + Any>(
         &mut self,
-        f: fn(&mut Resources) -> &mut Territory<R>,
+        f: fn(&mut Resources) -> &mut Option<Territory<R>>,
     ) -> WakeHandle<()> {
         let iron = self.iron();
         let copper = self.copper();
@@ -472,6 +623,8 @@ impl GameState {
         self.map(both, move |state, (iron, copper)| {
             let miner = Miner::build(iron, copper);
             f(&mut state.resources)
+                .as_mut()
+                .unwrap()
                 .add_miner(&state.tick, miner)
                 .unwrap();
         })
@@ -484,8 +637,7 @@ impl GameState {
                 if state.resources.copper_wire_assembler.is_present() {
                     state.craft1(copper, |resources| &mut resources.copper_wire_assembler)
                 } else {
-                    let out = CopperWireRecipe::craft(&mut state.tick, (copper,)).0;
-                    state.nowait(out)
+                    state.hand_craft::<_, CopperWireRecipe, _>((copper,))
                 }
             })
         })
@@ -539,8 +691,8 @@ impl GameState {
             let iron = state.iron();
             let circuit = state.circuit();
             let both = state.pair(iron, circuit);
-            state.map(both, |state, (iron, circuit)| {
-                RedScienceRecipe::craft(&mut state.tick, (iron, circuit)).0
+            state.then(both, |state, (iron, circuit)| {
+                state.hand_craft::<_, RedScienceRecipe, _>((iron, circuit))
             })
         })
     }
