@@ -7,6 +7,7 @@ use std::{
 
 use indexmap::{IndexMap, map::Entry};
 use itertools::Itertools;
+use rustorio::{Bundle, Resource, ResourceType};
 
 use crate::GameState;
 
@@ -376,5 +377,21 @@ impl GameState {
             }
         }
         self.enqueue_waiter(W(f))
+    }
+
+    pub fn collect_sum<const COUNT: u32, R: ResourceType + Any>(
+        &mut self,
+        handles: Vec<WakeHandle<Bundle<R, COUNT>>>,
+    ) -> WakeHandle<Resource<R>> {
+        let h = self.collect(handles);
+        self.map(h, |_state, bundles| {
+            bundles.into_iter().map(|b| b.to_resource()).sum()
+        })
+    }
+
+    /// Waits until the function returns `true`.
+    #[expect(unused)]
+    pub fn wait_until(&mut self, f: impl Fn(&mut GameState) -> bool + 'static) -> WakeHandle<()> {
+        self.wait_for(move |state| f(state).then_some(()))
     }
 }
