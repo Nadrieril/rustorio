@@ -9,7 +9,10 @@ use crate::GameState;
 pub struct WakeHandleId(u32);
 
 #[derive(Debug)]
-pub struct WakeHandle<T>(WakeHandleId, PhantomData<T>);
+pub struct WakeHandle<T> {
+    id: WakeHandleId,
+    phantom: PhantomData<T>,
+}
 
 impl<T> Clone for WakeHandle<T> {
     fn clone(&self) -> Self {
@@ -18,51 +21,49 @@ impl<T> Clone for WakeHandle<T> {
 }
 impl<T> Copy for WakeHandle<T> {}
 
+pub enum Poll<T> {
+    Pending,
+    WaitingFor(WakeHandleId),
+    Ready(T),
+}
+
 pub trait Waiter {
     type Output: Any;
-    fn is_ready(&mut self, state: &mut GameState) -> bool;
-    fn wake(self, state: &mut GameState) -> Self::Output;
+    fn poll(&mut self, state: &mut GameState) -> Poll<Self::Output>;
 }
 
 trait UntypedWaiter {
-    fn is_ready(&mut self, state: &mut GameState) -> bool;
-    fn wake(self: Box<Self>, state: &mut GameState) -> Box<dyn Any>;
+    fn poll(&mut self, state: &mut GameState) -> Poll<Box<dyn Any>>;
 }
 
 struct Untype<W>(W);
 impl<W: Waiter> UntypedWaiter for Untype<W> {
-    fn is_ready(&mut self, state: &mut GameState) -> bool {
-        self.0.is_ready(state)
-    }
-    fn wake(self: Box<Self>, state: &mut GameState) -> Box<dyn Any> {
-        Box::new(self.0.wake(state))
+    fn poll(&mut self, state: &mut GameState) -> Poll<Box<dyn Any>> {
+        match self.0.poll(state) {
+            Poll::Pending => Poll::Pending,
+            Poll::WaitingFor(h) => Poll::WaitingFor(h),
+            Poll::Ready(val) => Poll::Ready(Box::new(val)),
+        }
     }
 }
 
 #[derive(Default)]
 enum WaiterState {
-    Waiting(Box<dyn UntypedWaiter>),
+    Waiting {
+        waiter: Box<dyn UntypedWaiter>,
+        /// Wake this other waiter up when done.
+        dependent: Option<WakeHandleId>,
+    },
     Done(Box<dyn Any>),
     #[default]
-    Dummy, // Dummy state for mem::replace
+    BeingChecked, // Dummy state for mem::replace
 }
 
 impl WaiterState {
-    // fn should_wake(&self, state: &mut GameState) -> bool {
-    //     match self {
-    //         WaiterState::Waiting(waiter) => waiter.is_ready(state),
-    //         WaiterState::Done(_) => false,
-    //         WaiterState::Dummy => unreachable!(),
-    //     }
-    // }
     pub fn maybe_wake(&mut self, state: &mut GameState) {
-        if let WaiterState::Waiting(waiter) = self
-            && waiter.is_ready(state)
+        if let WaiterState::Waiting { waiter, .. } = self
+            && let Poll::Ready(val) = waiter.poll(state)
         {
-            let WaiterState::Waiting(waiter) = mem::replace(self, Self::Dummy) else {
-                unreachable!()
-            };
-            let val = waiter.wake(state);
             *self = WaiterState::Done(val);
         }
     }
@@ -72,6 +73,8 @@ impl WaiterState {
 pub struct WaiterQueue {
     next_handle: WakeHandleId,
     waiters: IndexMap<WakeHandleId, WaiterState>,
+    /// Waiters that are waiting on another one.
+    dormant: IndexMap<WakeHandleId, WaiterState>,
 }
 
 impl WaiterQueue {
@@ -83,41 +86,45 @@ impl WaiterQueue {
     /// Enqueues a waiter and returns a handle to wait for it.
     pub fn enqueue_waiter<W: Waiter + 'static>(&mut self, w: W) -> WakeHandle<W::Output> {
         let h = self.next_handle_id();
-        self.waiters
-            .insert(h, WaiterState::Waiting(Box::new(Untype(w))));
-        WakeHandle(h, PhantomData)
+        self.waiters.insert(
+            h,
+            WaiterState::Waiting {
+                waiter: Box::new(Untype(w)),
+                dependent: None,
+            },
+        );
+        WakeHandle {
+            id: h,
+            phantom: PhantomData,
+        }
     }
     /// Enqueues a fake waiter that's already done.
     pub fn set_already_resolved_handle<T: Any>(&mut self, x: T) -> WakeHandle<T> {
         let h = self.next_handle_id();
         self.waiters.insert(h, WaiterState::Done(Box::new(x)));
-        WakeHandle(h, PhantomData)
-    }
-    /// Get the value returned by the waiter if it is done.
-    pub fn get_ref<T: Any>(&mut self, h: WakeHandle<T>) -> Option<&T> {
-        match self.waiters.get(&h.0) {
-            Some(WaiterState::Done(x)) => Some(x.downcast_ref().unwrap()),
-            _ => None,
+        WakeHandle {
+            id: h,
+            phantom: PhantomData,
         }
     }
     pub fn is_ready<T: Any>(&mut self, h: WakeHandle<T>) -> bool {
-        match self.waiters.get(&h.0) {
+        match self.waiters.get(&h.id) {
             Some(WaiterState::Done(_)) => true,
             _ => false,
         }
     }
     /// Gets the value returned by the waiter if it is done. This moves the value out.
     pub fn get<T: Any>(&mut self, h: WakeHandle<T>) -> Option<T> {
-        match self.waiters.entry(h.0) {
+        match self.waiters.entry(h.id) {
             Entry::Occupied(entry) => match entry.get() {
-                WaiterState::Waiting(_) => None,
+                WaiterState::Waiting { .. } => None,
                 WaiterState::Done(_) => {
                     let WaiterState::Done(x) = entry.shift_remove() else {
                         unreachable!()
                     };
                     Some(*x.downcast().unwrap())
                 }
-                WaiterState::Dummy => unreachable!(),
+                WaiterState::BeingChecked => unreachable!(),
             },
             Entry::Vacant(_) => panic!("the value has been taken already"),
         }
@@ -129,7 +136,7 @@ impl WaiterQueue {
     pub fn waiters_to_check(&self) -> Vec<WakeHandleId> {
         self.waiters
             .iter()
-            .filter(|(_, waiter)| matches!(waiter, WaiterState::Waiting(..)))
+            .filter(|(_, waiter)| matches!(waiter, WaiterState::Waiting { .. }))
             .map(|(h, _)| *h)
             .collect_vec()
     }
@@ -148,8 +155,7 @@ impl GameState {
         Some(())
     }
     pub fn enqueue_waiter<W: Waiter + 'static>(&mut self, mut w: W) -> WakeHandle<W::Output> {
-        if w.is_ready(self) {
-            let ret = w.wake(self);
+        if let Poll::Ready(ret) = w.poll(self) {
             self.nowait(ret)
         } else {
             self.queue.enqueue_waiter(w)
@@ -164,22 +170,25 @@ impl GameState {
         h: WakeHandle<T>,
         f: impl FnOnce(&mut GameState, T) -> U + 'static,
     ) -> WakeHandle<U> {
-        struct W<F, T>(WakeHandle<T>, F);
+        struct W<F, T>(WakeHandle<T>, Option<F>);
         impl<F, T: Any, U: Any> Waiter for W<F, T>
         where
             F: FnOnce(&mut GameState, T) -> U,
         {
             type Output = U;
-            fn is_ready(&mut self, state: &mut GameState) -> bool {
-                let _ = state.check_waiter(self.0.0);
-                state.queue.is_ready(self.0)
-            }
-            fn wake(self, state: &mut GameState) -> U {
-                let v = state.queue.get(self.0).unwrap();
-                (self.1)(state, v)
+            fn poll(&mut self, state: &mut GameState) -> Poll<Self::Output> {
+                let _ = state.check_waiter(self.0.id);
+                if state.queue.is_ready(self.0) {
+                    let v = state.queue.get(self.0).unwrap();
+                    let f = self.1.take().unwrap();
+                    let v = f(state, v);
+                    Poll::Ready(v)
+                } else {
+                    Poll::WaitingFor(self.0.id)
+                }
             }
         }
-        self.enqueue_waiter(W(h, f))
+        self.enqueue_waiter(W(h, Some(f)))
     }
 
     /// Schedules `f` to run after `h` completes, and returns a hendl to the final output.
@@ -197,24 +206,21 @@ impl GameState {
             F: FnOnce(&mut GameState, T) -> WakeHandle<U>,
         {
             type Output = U;
-            fn is_ready(&mut self, state: &mut GameState) -> bool {
-                if let W::First(h, f) = self
-                    && let _ = state.check_waiter(h.0)
-                    && let Some(v) = state.queue.get(*h)
-                {
+            fn poll(&mut self, state: &mut GameState) -> Poll<Self::Output> {
+                if let W::First(h, f) = self {
+                    let _ = state.check_waiter(h.id);
+                    let Some(v) = state.queue.get(*h) else {
+                        return Poll::WaitingFor(h.id);
+                    };
                     let f = mem::take(f).unwrap();
                     *self = W::Second(f(state, v));
                 }
-                if let W::Second(h) = self {
-                    state.check_waiter(h.0);
-                    state.queue.get_ref(*h).is_some()
-                } else {
-                    false
-                }
-            }
-            fn wake(self, state: &mut GameState) -> U {
                 let W::Second(h) = self else { unreachable!() };
-                state.queue.get(h).unwrap()
+                state.check_waiter(h.id);
+                let Some(v) = state.queue.get(*h) else {
+                    return Poll::WaitingFor(h.id);
+                };
+                Poll::Ready(v)
             }
         }
         self.enqueue_waiter(W::First(h, Some(f)))
@@ -229,15 +235,19 @@ impl GameState {
         struct W<T, U>(WakeHandle<T>, WakeHandle<U>);
         impl<T: Any, U: Any> Waiter for W<T, U> {
             type Output = (T, U);
-            fn is_ready(&mut self, state: &mut GameState) -> bool {
+            fn poll(&mut self, state: &mut GameState) -> Poll<Self::Output> {
                 let Self(x, y) = *self;
-                let _ = state.check_waiter(x.0);
-                let _ = state.check_waiter(y.0);
-                state.queue.is_ready(x) && state.queue.is_ready(y)
-            }
-            fn wake(self, state: &mut GameState) -> (T, U) {
-                let Self(x, y) = self;
-                (state.queue.get(x).unwrap(), state.queue.get(y).unwrap())
+                let _ = state.check_waiter(x.id);
+                if !state.queue.is_ready(x) {
+                    return Poll::WaitingFor(x.id);
+                }
+                let _ = state.check_waiter(y.id);
+                if !state.queue.is_ready(y) {
+                    return Poll::WaitingFor(y.id);
+                }
+                let Self(x, y) = *self;
+                let v = (state.queue.get(x).unwrap(), state.queue.get(y).unwrap());
+                Poll::Ready(v)
             }
         }
         self.enqueue_waiter(W(x, y))
@@ -260,23 +270,43 @@ impl GameState {
         struct W<T>(Vec<WakeHandle<T>>);
         impl<T: Any> Waiter for W<T> {
             type Output = Vec<T>;
-            fn is_ready(&mut self, state: &mut GameState) -> bool {
-                let mut all_ready = true;
+            fn poll(&mut self, state: &mut GameState) -> Poll<Self::Output> {
                 for h in self.0.iter() {
-                    let _ = state.check_waiter(h.0);
+                    let _ = state.check_waiter(h.id);
                     if !state.queue.is_ready(*h) {
-                        all_ready = false
+                        return Poll::WaitingFor(h.id);
                     }
                 }
-                all_ready
-            }
-            fn wake(self, state: &mut GameState) -> Vec<T> {
-                self.0
-                    .into_iter()
-                    .map(|h| state.queue.get(h).unwrap())
-                    .collect()
+                let v = self
+                    .0
+                    .iter()
+                    .map(|h| state.queue.get(*h).unwrap())
+                    .collect();
+                Poll::Ready(v)
             }
         }
         self.enqueue_waiter(W(handles))
+    }
+
+    /// Waits until the function returns `Some` and yields the returned value.
+    pub fn wait_for<T: Any>(
+        &mut self,
+        f: impl Fn(&mut GameState) -> Option<T> + 'static,
+    ) -> WakeHandle<T> {
+        struct W<F>(F);
+
+        impl<F, T: Any> Waiter for W<F>
+        where
+            F: Fn(&mut GameState) -> Option<T>,
+        {
+            type Output = T;
+            fn poll(&mut self, state: &mut GameState) -> Poll<Self::Output> {
+                match (self.0)(state) {
+                    Some(x) => Poll::Ready(x),
+                    None => Poll::Pending,
+                }
+            }
+        }
+        self.enqueue_waiter(W(f))
     }
 }

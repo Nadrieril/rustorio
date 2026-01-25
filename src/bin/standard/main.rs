@@ -207,40 +207,6 @@ impl GameState {
         })
     }
 
-    /// Waits until the function returns `Some` and yields the returned value.
-    fn wait_for<T: Any>(
-        &mut self,
-        f: impl Fn(&mut GameState) -> Option<T> + 'static,
-    ) -> WakeHandle<T> {
-        enum W<F, T> {
-            Waiting(F),
-            Ready(T),
-        }
-        impl<F, T: Any> Waiter for W<F, T>
-        where
-            F: Fn(&mut GameState) -> Option<T>,
-        {
-            type Output = T;
-            fn is_ready(&mut self, state: &mut GameState) -> bool {
-                match self {
-                    W::Waiting(f) => match f(state) {
-                        Some(x) => {
-                            *self = W::Ready(x);
-                            true
-                        }
-                        None => false,
-                    },
-                    W::Ready(_) => true,
-                }
-            }
-            fn wake(self, _state: &mut GameState) -> T {
-                let W::Ready(x) = self else { unreachable!() };
-                x
-            }
-        }
-        self.enqueue_waiter(W::Waiting(f))
-    }
-
     /// Waits until the function returns `true`.
     fn wait_until(&mut self, f: impl Fn(&mut GameState) -> bool + 'static) -> WakeHandle<()> {
         self.wait_for(move |state| f(state).then_some(()))
