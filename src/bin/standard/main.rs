@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-#![feature(generic_const_exprs)]
+#![feature(generic_const_exprs, try_trait_v2, never_type)]
 #![allow(incomplete_features)]
 use std::any::Any;
 
