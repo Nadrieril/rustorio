@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 #![feature(generic_const_exprs, try_trait_v2, never_type)]
 #![allow(incomplete_features)]
-use std::any::Any;
+use std::{any::Any, mem};
 
 use itertools::Itertools;
 use rustorio::{
@@ -32,6 +32,122 @@ fn main() {
     rustorio::play::<GameMode>(user_main);
 }
 
+// Const fns because direct field access is not allowed in const exprs.
+const fn tup1_field0<A: Copy>(x: (A,)) -> A {
+    x.0
+}
+const fn tup2_field0<A: Copy, B: Copy>(x: (A, B)) -> A {
+    x.0
+}
+const fn tup2_field1<A: Copy, B: Copy>(x: (A, B)) -> B {
+    x.1
+}
+
+/// Trait to compute statically-counted inputs and outputs. The const generic is needed because the
+/// impls would otherwise be considered to overlap.
+trait ConstRecipe<const INPUT_N: u32>: Recipe {
+    type BundledInputs;
+    type BundledOutputs;
+    fn add_inputs(to: &mut Self::Inputs, i: Self::BundledInputs);
+    fn get_outputs(from: &mut Self::Outputs) -> Option<Self::BundledOutputs>;
+}
+
+impl<R, I, O> ConstRecipe<1> for R
+where
+    I: ResourceType,
+    O: ResourceType,
+    R: Recipe<Inputs = (Resource<I>,), InputAmountsType = (u32,)>,
+    R: Recipe<Outputs = (Resource<O>,), OutputAmountsType = (u32,)>,
+    [(); { tup1_field0(R::INPUT_AMOUNTS) } as usize]:,
+    [(); { tup1_field0(R::OUTPUT_AMOUNTS) } as usize]:,
+{
+    type BundledInputs = (Bundle<I, { tup1_field0(R::INPUT_AMOUNTS) }>,);
+    type BundledOutputs = (Bundle<O, { tup1_field0(R::OUTPUT_AMOUNTS) }>,);
+    fn add_inputs(to: &mut Self::Inputs, i: Self::BundledInputs) {
+        to.0.add(i.0);
+    }
+    fn get_outputs(from: &mut Self::Outputs) -> Option<Self::BundledOutputs> {
+        Some((from.0.bundle().ok()?,))
+    }
+}
+
+impl<R, I1, I2, O> ConstRecipe<2> for R
+where
+    I1: ResourceType,
+    I2: ResourceType,
+    O: ResourceType,
+    R: Recipe<Inputs = (Resource<I1>, Resource<I2>), InputAmountsType = (u32, u32)>,
+    R: Recipe<Outputs = (Resource<O>,), OutputAmountsType = (u32,)>,
+    [(); { tup2_field0(R::INPUT_AMOUNTS) } as usize]:,
+    [(); { tup2_field1(R::INPUT_AMOUNTS) } as usize]:,
+    [(); { tup1_field0(R::OUTPUT_AMOUNTS) } as usize]:,
+{
+    type BundledInputs = (
+        Bundle<I1, { tup2_field0(R::INPUT_AMOUNTS) }>,
+        Bundle<I2, { tup2_field1(R::INPUT_AMOUNTS) }>,
+    );
+    type BundledOutputs = (Bundle<O, { tup1_field0(R::OUTPUT_AMOUNTS) }>,);
+    fn add_inputs(to: &mut Self::Inputs, i: Self::BundledInputs) {
+        to.0.add(i.0);
+        to.1.add(i.1);
+    }
+    fn get_outputs(from: &mut Self::Outputs) -> Option<Self::BundledOutputs> {
+        Some((from.0.bundle().ok()?,))
+    }
+}
+
+trait Machine {
+    type Recipe: Recipe<Inputs: MachineInputs>;
+    fn inputs(&mut self, tick: &Tick) -> &mut <Self::Recipe as Recipe>::Inputs;
+    fn outputs(&mut self, tick: &Tick) -> &mut <Self::Recipe as Recipe>::Outputs;
+}
+
+impl<R: FurnaceRecipe + Recipe<Inputs: MachineInputs>> Machine for Furnace<R> {
+    type Recipe = R;
+    fn inputs(&mut self, tick: &Tick) -> &mut <R as Recipe>::Inputs {
+        self.inputs(tick)
+    }
+    fn outputs(&mut self, tick: &Tick) -> &mut <R as Recipe>::Outputs {
+        self.outputs(tick)
+    }
+}
+impl<R: AssemblerRecipe + Recipe<Inputs: MachineInputs>> Machine for Assembler<R> {
+    type Recipe = R;
+    fn inputs(&mut self, tick: &Tick) -> &mut <R as Recipe>::Inputs {
+        self.inputs(tick)
+    }
+    fn outputs(&mut self, tick: &Tick) -> &mut <R as Recipe>::Outputs {
+        self.outputs(tick)
+    }
+}
+impl<T: Technology> Machine for Lab<T>
+where
+    TechRecipe<T>: Recipe<Inputs: MachineInputs>,
+{
+    type Recipe = TechRecipe<T>;
+    fn inputs(&mut self, tick: &Tick) -> &mut <TechRecipe<T> as Recipe>::Inputs {
+        self.inputs(tick)
+    }
+    fn outputs(&mut self, tick: &Tick) -> &mut <TechRecipe<T> as Recipe>::Outputs {
+        self.outputs(tick)
+    }
+}
+
+trait MachineInputs {
+    fn input_count(&self) -> u32;
+}
+impl<R1: ResourceType> MachineInputs for (Resource<R1>,) {
+    fn input_count(&self) -> u32 {
+        self.0.amount()
+    }
+}
+impl<R1: ResourceType, R2: ResourceType> MachineInputs for (Resource<R1>, Resource<R2>) {
+    fn input_count(&self) -> u32 {
+        // Doesn't matter which we pick since we're comparing along the same resource.
+        self.0.amount()
+    }
+}
+
 struct GameState {
     tick: Tick,
     resources: Resources,
@@ -59,23 +175,79 @@ struct Resources {
     points_lab: MachineStorage<Lab<PointsTechnology>>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct MachineId(usize);
+
 #[derive(Default)]
 enum MachineStorage<M> {
     /// The machine isn't there; craft by hand.
     #[default]
     NoMachine,
     /// The machine is there.
-    Present(M),
+    Present(Vec<M>),
+    /// We removed that machine; error when trying to craft.
+    Removed,
 }
 
 impl<M> MachineStorage<M> {
     fn is_present(&self) -> bool {
         matches!(self, Self::Present(_))
     }
-    fn as_mut(&mut self) -> &mut M {
+    fn add(&mut self, m: M) {
+        eprintln!("adding a {}", std::any::type_name::<M>());
+        if !self.is_present() {
+            *self = Self::Present(vec![])
+        }
+        let Self::Present(vec) = self else {
+            unreachable!()
+        };
+        vec.push(m);
+    }
+
+    fn request(&mut self, tick: &Tick) -> Option<MachineId>
+    where
+        M: Machine,
+    {
         match self {
-            Self::Present(m) => m,
+            Self::NoMachine => None,
+            // Find the least loaded machine
+            Self::Present(vec) => {
+                let res = vec
+                    .iter_mut()
+                    .map(|m| m.inputs(tick).input_count())
+                    .enumerate()
+                    .min_by_key(|(_, input_count)| *input_count)
+                    .map(|(id, _)| MachineId(id));
+                // if vec.len() > 1 {
+                //     let (min, max) = vec
+                //         .iter_mut()
+                //         .map(|m| m.inputs(tick).input_count())
+                //         .minmax_by_key(|input_count| *input_count)
+                //         .into_option()
+                //         .unwrap();
+                //     eprintln!(
+                //         "picked {:?} among {} {} ([{min}, {max}])",
+                //         res,
+                //         vec.len(),
+                //         std::any::type_name::<M>()
+                //     );
+                // }
+                res
+            }
+            Self::Removed => panic!("trying to craft with a removed machine"),
+        }
+    }
+    fn get(&mut self, id: MachineId) -> &mut M {
+        match self {
+            Self::Present(vec) => &mut vec[id.0],
             _ => panic!(),
+        }
+    }
+    fn take_map<N>(&mut self, f: impl Fn(M) -> N) -> MachineStorage<N> {
+        match mem::replace(self, Self::Removed) {
+            Self::NoMachine => MachineStorage::NoMachine,
+            Self::Present(vec) => MachineStorage::Present(vec.into_iter().map(f).collect()),
+            Self::Removed => MachineStorage::Removed,
         }
     }
 }
@@ -146,100 +318,6 @@ impl GameState {
     }
 }
 
-// Const fns because direct field access is not allowed in const exprs.
-const fn tup1_field0<A: Copy>(x: (A,)) -> A {
-    x.0
-}
-const fn tup2_field0<A: Copy, B: Copy>(x: (A, B)) -> A {
-    x.0
-}
-const fn tup2_field1<A: Copy, B: Copy>(x: (A, B)) -> B {
-    x.1
-}
-
-/// Trait to compute statically-counted inputs and outputs. The const generic is needed because the
-/// impls would otherwise be considered to overlap.
-trait ConstRecipe<const INPUT_N: u32>: Recipe {
-    type BundledInputs;
-    type BundledOutputs;
-    fn add_inputs(to: &mut Self::Inputs, i: Self::BundledInputs);
-    fn get_outputs(from: &mut Self::Outputs) -> Option<Self::BundledOutputs>;
-}
-
-impl<R, I, O> ConstRecipe<1> for R
-where
-    I: ResourceType,
-    O: ResourceType,
-    R: Recipe<Inputs = (Resource<I>,), InputAmountsType = (u32,)>,
-    R: Recipe<Outputs = (Resource<O>,), OutputAmountsType = (u32,)>,
-    [(); { tup1_field0(R::INPUT_AMOUNTS) } as usize]:,
-    [(); { tup1_field0(R::OUTPUT_AMOUNTS) } as usize]:,
-{
-    type BundledInputs = (Bundle<I, { tup1_field0(R::INPUT_AMOUNTS) }>,);
-    type BundledOutputs = (Bundle<O, { tup1_field0(R::OUTPUT_AMOUNTS) }>,);
-    fn add_inputs(to: &mut Self::Inputs, i: Self::BundledInputs) {
-        to.0.add(i.0);
-    }
-    fn get_outputs(from: &mut Self::Outputs) -> Option<Self::BundledOutputs> {
-        Some((from.0.bundle().ok()?,))
-    }
-}
-
-impl<R, I1, I2, O> ConstRecipe<2> for R
-where
-    I1: ResourceType,
-    I2: ResourceType,
-    O: ResourceType,
-    R: Recipe<Inputs = (Resource<I1>, Resource<I2>), InputAmountsType = (u32, u32)>,
-    R: Recipe<Outputs = (Resource<O>,), OutputAmountsType = (u32,)>,
-    [(); { tup2_field0(R::INPUT_AMOUNTS) } as usize]:,
-    [(); { tup2_field1(R::INPUT_AMOUNTS) } as usize]:,
-    [(); { tup1_field0(R::OUTPUT_AMOUNTS) } as usize]:,
-{
-    type BundledInputs = (
-        Bundle<I1, { tup2_field0(R::INPUT_AMOUNTS) }>,
-        Bundle<I2, { tup2_field1(R::INPUT_AMOUNTS) }>,
-    );
-    type BundledOutputs = (Bundle<O, { tup1_field0(R::OUTPUT_AMOUNTS) }>,);
-    fn add_inputs(to: &mut Self::Inputs, i: Self::BundledInputs) {
-        to.0.add(i.0);
-        to.1.add(i.1);
-    }
-    fn get_outputs(from: &mut Self::Outputs) -> Option<Self::BundledOutputs> {
-        Some((from.0.bundle().ok()?,))
-    }
-}
-
-trait Machine<R: Recipe> {
-    fn inputs(&mut self, tick: &Tick) -> &mut <R as Recipe>::Inputs;
-    fn outputs(&mut self, tick: &Tick) -> &mut <R as Recipe>::Outputs;
-}
-
-impl<R: FurnaceRecipe> Machine<R> for Furnace<R> {
-    fn inputs(&mut self, tick: &Tick) -> &mut <R as Recipe>::Inputs {
-        self.inputs(tick)
-    }
-    fn outputs(&mut self, tick: &Tick) -> &mut <R as Recipe>::Outputs {
-        self.outputs(tick)
-    }
-}
-impl<R: AssemblerRecipe> Machine<R> for Assembler<R> {
-    fn inputs(&mut self, tick: &Tick) -> &mut <R as Recipe>::Inputs {
-        self.inputs(tick)
-    }
-    fn outputs(&mut self, tick: &Tick) -> &mut <R as Recipe>::Outputs {
-        self.outputs(tick)
-    }
-}
-impl<T: Technology> Machine<TechRecipe<T>> for Lab<T> {
-    fn inputs(&mut self, tick: &Tick) -> &mut <TechRecipe<T> as Recipe>::Inputs {
-        self.inputs(tick)
-    }
-    fn outputs(&mut self, tick: &Tick) -> &mut <TechRecipe<T> as Recipe>::Outputs {
-        self.outputs(tick)
-    }
-}
-
 impl GameState {
     pub fn collect_sum<const COUNT: u32, R: ResourceType + Any>(
         &mut self,
@@ -284,16 +362,16 @@ impl GameState {
     ) -> WakeHandle<O>
     where
         R: ConstRecipe<N, BundledOutputs = (O,)> + Any,
-        M: Machine<R> + Any,
+        M: Machine<Recipe = R> + Any,
         O: Any,
     {
-        let machine_ready = self.wait_until(move |s| f(&mut s.resources).is_present());
-        self.then(machine_ready, move |state, _| {
-            let machine = f(&mut state.resources).as_mut();
+        let machine_id = self.wait_for(move |s| f(&mut s.resources).request(&s.tick));
+        self.then(machine_id, move |state, machine_id| {
+            let machine = f(&mut state.resources).get(machine_id);
             let machine_inputs = machine.inputs(&state.tick);
             R::add_inputs(machine_inputs, inputs);
             let out = state.wait_for(move |state| {
-                let machine = f(&mut state.resources).as_mut();
+                let machine = f(&mut state.resources).get(machine_id);
                 R::get_outputs(&mut machine.outputs(&state.tick))
             });
             state.map(out, |_, out| out.0)
@@ -308,7 +386,7 @@ impl GameState {
     ) -> WakeHandle<O>
     where
         R: ConstRecipe<1, BundledInputs = (I,), BundledOutputs = (O,)> + Any,
-        M: Machine<R> + Any,
+        M: Machine<Recipe = R> + Any,
         O: Any,
     {
         self.craft((input,), f)
@@ -321,7 +399,7 @@ impl GameState {
     ) -> WakeHandle<()> {
         let machine = make_machine(self);
         self.map(machine, move |state, machine| {
-            *machine_storage(&mut state.resources) = MachineStorage::Present(machine);
+            machine_storage(&mut state.resources).add(machine);
         })
     }
 }
@@ -472,6 +550,7 @@ impl GameState {
         lab: fn(&mut Resources) -> &mut MachineStorage<Lab<T>>,
     ) -> WakeHandle<Bundle<ResearchPoint<T>, COUNT>>
     where
+        <TechRecipe<T> as Recipe>::Inputs: MachineInputs,
         TechRecipe<T>: ConstRecipe<
                 1,
                 BundledInputs = (Bundle<RedScience, 1>,),
@@ -505,6 +584,10 @@ impl GameState {
         self.add_miner(|r| &mut r.iron_territory);
         self.add_miner(|r| &mut r.copper_territory);
 
+        self.add_furnace(IronSmelting, |r| &mut r.iron_furnace);
+        self.add_furnace(IronSmelting, |r| &mut r.iron_furnace);
+        self.add_furnace(CopperSmelting, |r| &mut r.copper_furnace);
+
         let h = self.add_assembler(CopperWireRecipe, |r| &mut r.copper_wire_assembler);
         self.complete(h);
 
@@ -512,10 +595,22 @@ impl GameState {
 
         self.add_lab(|r| &r.steel_technology, |r| &mut r.steel_lab);
 
+        // self.add_miner(|r| &mut r.iron_territory);
+        // self.add_furnace(IronSmelting, |r| &mut r.iron_furnace);
+        // self.add_miner(|r| &mut r.copper_territory);
+        // self.add_furnace(CopperSmelting, |r| &mut r.copper_furnace);
+
+        // self.add_assembler(CopperWireRecipe, |r| &mut r.copper_wire_assembler);
+        // self.add_assembler(ElectronicCircuitRecipe, |r| &mut r.elec_circuit_assembler);
+
         let research_points = self.red_science_tech(|r| &mut r.steel_lab);
         self.map(research_points, |state, research_points| {
             let steel_tech = state.resources.steel_technology.take().unwrap();
             let (steel_smelting, points_tech) = steel_tech.research(research_points);
+            state.resources.points_lab = state
+                .resources
+                .steel_lab
+                .take_map(|lab| lab.change_technology(&points_tech).unwrap());
             state.resources.steel_smelting = Some(steel_smelting);
             state.resources.points_technology = Some(points_tech);
         });
@@ -525,7 +620,7 @@ impl GameState {
             state.add_furnace(steel_smelting, |r| &mut r.steel_furnace)
         });
 
-        self.add_lab(|r| &r.points_technology, |r| &mut r.points_lab);
+        // self.add_lab(|r| &r.points_technology, |r| &mut r.points_lab);
 
         let research_points = self.red_science_tech(|r| &mut r.points_lab);
         self.map(research_points, |state, research_points| {
@@ -538,6 +633,9 @@ impl GameState {
         self.then(points_recipe, |state, points_recipe| {
             state.add_assembler(points_recipe, |r| &mut r.points_assembler)
         });
+
+        // self.add_miner(|r| &mut r.iron_territory);
+        // self.add_furnace(IronSmelting, |r| &mut r.iron_furnace);
 
         let _points = self.points::<10>();
         self.complete_all();
