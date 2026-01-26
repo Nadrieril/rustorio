@@ -16,7 +16,7 @@ use rustorio_engine::research::TechRecipe;
 
 use crate::{
     GameState, Resources,
-    machine::{Machine, MachineInputs, MachineSlot},
+    machine::{Machine, MachineSlot},
     scheduler::WakeHandle,
 };
 
@@ -216,7 +216,7 @@ impl Makeable for PointRecipe {
 
 impl<R> Makeable for Furnace<R>
 where
-    R: FurnaceRecipe + Recipe<Inputs: MachineInputs> + Makeable,
+    R: FurnaceRecipe + Recipe + Makeable,
 {
     fn make(state: &mut GameState) -> WakeHandle<Self> {
         let inputs = state.make();
@@ -227,7 +227,7 @@ where
 }
 impl<R> Makeable for Assembler<R>
 where
-    R: AssemblerRecipe + Recipe<Inputs: MachineInputs> + Makeable,
+    R: AssemblerRecipe + Recipe + Makeable,
 {
     fn make(state: &mut GameState) -> WakeHandle<Self> {
         let inputs = state.make();
@@ -379,7 +379,7 @@ impl MachineMakeable for Point {
 impl<T: Technology + Any> MachineMakeable for ResearchPoint<T>
 where
     Lab<T>: Makeable,
-    TechRecipe<T>: Recipe<Inputs: MachineInputs, Outputs = (Resource<Self>,)>
+    TechRecipe<T>: Recipe<Outputs = (Resource<Self>,)>
         + ConstRecipe<BundledInputs: Makeable, BundledOutputs = (Bundle<Self, 1>,)>,
 {
     type Machine = Lab<T>;
@@ -441,22 +441,6 @@ impl GameState {
         self.wait_for(move |state| f(state).bundle().ok())
     }
 
-    /// Waits until the selected machine has produced enough output.
-    /// This is the main wait point of our system.
-    fn wait_for_machine_output<M>(
-        &mut self,
-        machine_id: MachineSlot<M>,
-    ) -> WakeHandle<<M::Recipe as ConstRecipe>::BundledOutputs>
-    where
-        M: Machine + Makeable,
-        M::Recipe: ConstRecipe + Any,
-    {
-        self.wait_for(move |state| {
-            let machine = state.resources.machine_store.get(machine_id);
-            M::Recipe::get_outputs(&mut machine.outputs(&state.tick))
-        })
-    }
-
     /// Craft an item using the provided machine.
     pub fn craft<M, O>(
         &mut self,
@@ -468,9 +452,11 @@ impl GameState {
         O: Any,
     {
         self.make_then(move |state, slot: MachineSlot<M>| {
-            let machine = state.resources.machine_store.get(slot);
-            let machine_inputs = machine.inputs(&state.tick);
-            M::Recipe::add_inputs(machine_inputs, inputs);
+            state
+                .resources
+                .machine_store
+                .get_slot(slot)
+                .add_inputs(&state.tick, inputs);
             let out = state.wait_for_machine_output(slot);
             state.map(out, |_, out| out.0)
         })

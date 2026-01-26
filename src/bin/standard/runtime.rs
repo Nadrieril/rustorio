@@ -1,5 +1,6 @@
 use std::{any::Any, collections::VecDeque, ops::Deref};
 
+use itertools::Itertools;
 use rustorio::Tick;
 
 use crate::{
@@ -34,6 +35,7 @@ impl<T> Deref for RestrictMut<T> {
 
 pub struct GameState {
     pub tick: RestrictMut<Tick>,
+    last_reported_tick: u64,
     /// Advancing time during the waiter updates risks skipping updates. So instead we require that
     /// jobs which need mutable ownership of the `Tick` be put in a separate queue.
     mut_tick_queue: VecDeque<Box<dyn FnOnce(&mut GameState, RestrictMutToken)>>,
@@ -46,6 +48,7 @@ impl GameState {
         tick.log(false);
         GameState {
             tick: RestrictMut::new(tick),
+            last_reported_tick: 0,
             mut_tick_queue: Default::default(),
             queue: Default::default(),
             resources: Resources::new(starting_resources),
@@ -71,29 +74,22 @@ impl GameState {
         self.report_loads();
     }
     pub fn report_loads(&mut self) {
-        if true {
+        if self.tick.cur() / 50 == self.last_reported_tick / 50 {
             return;
         }
-        // let r = &mut self.resources;
-        // macro_rules! max_load {
-        //     ($($m:ident,)*) => {
-        //         [$(
-        //             r.$m.max_load(&self.tick),
-        //         )*]
-        //     };
-        // }
-        // // let loads = max_load!(
-        // //     iron_furnace,
-        // //     copper_furnace,
-        // //     steel_furnace,
-        // //     copper_wire_assembler,
-        // //     elec_circuit_assembler,
-        // //     points_assembler,
-        // //     steel_lab,
-        // //     points_lab,
-        // // );
-        // let (max_load, name) = loads.iter().flatten().max().unwrap();
-        // eprintln!("{}: a {name} has load {max_load}", self.tick.as_ref());
+        self.last_reported_tick = self.tick.cur();
+
+        // TODO: how about add a machine if load too big? Clients are only waiting when the inputs
+        // are ready so this isn't backpressure, it's a bottleneck.
+        let r = &mut self.resources;
+        let loads = r
+            .machine_store
+            .iter()
+            .map(|store| store.report_load())
+            .sorted()
+            .map(|(name, load)| format!(" - {name}: {load}\n"))
+            .format("");
+        eprintln!("{}:\n{}", self.tick.as_ref(), loads)
     }
     pub fn complete<R: Any>(&mut self, h: WakeHandle<R>) -> R {
         loop {

@@ -57,11 +57,11 @@ impl ResourceStore {
 #[derive(Default)]
 pub struct MachineStore {
     /// Maps the type id of `M` to a `Box<MachineStorage<M>>`.
-    map: HashMap<TypeId, Box<dyn StoredMachine>>,
+    map: HashMap<TypeId, Box<dyn StoredMachines>>,
 }
 impl MachineStore {
     pub fn for_type<M: Machine + Any>(&mut self) -> &mut MachineStorage<M> {
-        let storage: &mut (dyn StoredMachine + 'static) = self
+        let storage: &mut (dyn StoredMachines + 'static) = self
             .map
             .entry(TypeId::of::<M>())
             .or_insert_with(|| Box::new(MachineStorage::<M>::default()))
@@ -69,19 +69,26 @@ impl MachineStore {
         let storage: &mut (dyn Any + 'static) = storage;
         storage.downcast_mut().unwrap()
     }
-    pub fn get<M: Machine + Any>(&mut self, id: MachineSlot<M>) -> &mut M {
+    pub fn get_slot<M: Machine + Any>(&mut self, id: MachineSlot<M>) -> &mut MachineWithQueue<M> {
         self.for_type::<M>().get(id)
     }
-    pub fn iter(&mut self) -> impl Iterator<Item = &mut dyn StoredMachine> {
+    pub fn iter(&mut self) -> impl Iterator<Item = &mut dyn StoredMachines> {
         self.map.values_mut().map(|s| s.as_mut())
     }
 }
 
-pub trait StoredMachine: Any {}
-impl<M: Machine + Any> StoredMachine for MachineStorage<M> {}
+pub trait StoredMachines: Any {
+    fn report_load(&mut self) -> (&str, usize);
+}
+impl<M: Machine + Any> StoredMachines for MachineStorage<M> {
+    fn report_load(&mut self) -> (&str, usize) {
+        let load = MachineStorage::total_load(self);
+        (std::any::type_name::<M>(), load)
+    }
+}
 
 #[derive(Default)]
-struct Resources {
+pub struct Resources {
     iron_territory: Option<Territory<IronOre>>,
     copper_territory: Option<Territory<CopperOre>>,
 
@@ -150,7 +157,7 @@ impl GameState {
         // self.add_miner(|r| &mut r.iron_territory);
         // self.add_furnace(IronSmelting);
 
-        let _points: WakeHandle<Bundle<Point, 10>> = self.make();
+        let _points: WakeHandle<Bundle<Point, 30>> = self.make();
         self.complete_all();
         todo!("WIP: {}", self.tick.cur())
         // let points = self.complete(points);

@@ -1,13 +1,18 @@
 use std::{
     any::{Any, type_name},
+    cell::RefCell,
+    collections::VecDeque,
     marker::PhantomData,
     mem,
+    rc::Rc,
+    sync::Arc,
 };
 
 use rustorio::{
-    Recipe, Resource, ResourceType, Technology, Tick,
+    Recipe, ResourceType, Technology, Tick,
     buildings::{Assembler, Furnace, Lab},
     recipes::{AssemblerRecipe, FurnaceRecipe},
+    resources::IronOre,
     territory::{Miner, Territory},
 };
 use rustorio_engine::research::TechRecipe;
@@ -15,26 +20,29 @@ use rustorio_engine::research::TechRecipe;
 use crate::{
     GameState, Resources,
     crafting::{ConstRecipe, Makeable},
-    scheduler::WakeHandle,
+    scheduler::{WakeHandle, WakeHandleId},
 };
 
 pub trait Machine {
-    type Recipe: Recipe<Inputs: MachineInputs>;
+    type Recipe: ConstRecipe;
     fn inputs(&mut self, tick: &Tick) -> &mut <Self::Recipe as Recipe>::Inputs;
     fn outputs(&mut self, tick: &Tick) -> &mut <Self::Recipe as Recipe>::Outputs;
-    /// Count the number of recipe instances left in this input bundle.
-    fn input_load(&mut self, tick: &Tick) -> u32
-    where
-        Self::Recipe: ConstRecipe,
-    {
-        Self::Recipe::input_load(self.inputs(tick))
+    fn add_bundled_inputs(
+        &mut self,
+        tick: &Tick,
+        inputs: <Self::Recipe as ConstRecipe>::BundledInputs,
+    ) {
+        Self::Recipe::add_inputs(self.inputs(tick), inputs);
     }
-    fn type_name(&self) -> &str {
-        std::any::type_name::<Self>()
+    fn get_bundled_outputs(
+        &mut self,
+        tick: &Tick,
+    ) -> Option<<Self::Recipe as ConstRecipe>::BundledOutputs> {
+        Self::Recipe::get_outputs(&mut self.outputs(tick))
     }
 }
 
-impl<R: FurnaceRecipe + Recipe<Inputs: MachineInputs>> Machine for Furnace<R> {
+impl<R: FurnaceRecipe + Recipe + ConstRecipe> Machine for Furnace<R> {
     type Recipe = R;
     fn inputs(&mut self, tick: &Tick) -> &mut <R as Recipe>::Inputs {
         self.inputs(tick)
@@ -43,7 +51,7 @@ impl<R: FurnaceRecipe + Recipe<Inputs: MachineInputs>> Machine for Furnace<R> {
         self.outputs(tick)
     }
 }
-impl<R: AssemblerRecipe + Recipe<Inputs: MachineInputs>> Machine for Assembler<R> {
+impl<R: AssemblerRecipe + Recipe + ConstRecipe> Machine for Assembler<R> {
     type Recipe = R;
     fn inputs(&mut self, tick: &Tick) -> &mut <R as Recipe>::Inputs {
         self.inputs(tick)
@@ -54,7 +62,7 @@ impl<R: AssemblerRecipe + Recipe<Inputs: MachineInputs>> Machine for Assembler<R
 }
 impl<T: Technology> Machine for Lab<T>
 where
-    TechRecipe<T>: Recipe<Inputs: MachineInputs>,
+    TechRecipe<T>: Recipe + ConstRecipe,
 {
     type Recipe = TechRecipe<T>;
     fn inputs(&mut self, tick: &Tick) -> &mut <TechRecipe<T> as Recipe>::Inputs {
@@ -65,20 +73,23 @@ where
     }
 }
 
-pub trait MachineInputs {
-    fn input_count(&self) -> u32;
-}
-impl<R1: ResourceType> MachineInputs for (Resource<R1>,) {
-    fn input_count(&self) -> u32 {
-        self.0.amount()
-    }
-}
-impl<R1: ResourceType, R2: ResourceType> MachineInputs for (Resource<R1>, Resource<R2>) {
-    fn input_count(&self) -> u32 {
-        // Doesn't matter which we pick since we're comparing along the same resource.
-        self.0.amount()
-    }
-}
+// /// `Miners` don't quite work like machines but it would be super nice to integrate them in our
+// /// load balancing setup, so for each miner we add a corresponding miner-machine that serves as
+// /// interface. Making a new one of these will add a miner to the right territory.
+// struct IronOreMachine(Rc<RefCell<Territory<IronOre>>>);
+
+// struct IronMiningRecipe;
+// impl Recipe for IronMiningRecipe {}
+
+// impl Machine for IronOreMachine {
+//     type Recipe = IronMiningRecipe;
+
+//     fn inputs(&mut self, tick: &Tick) -> &mut <Self::Recipe as Recipe>::Inputs {
+//         todo!()
+//     }
+
+//     fn outputs(&mut self, tick: &Tick) -> &mut <Self::Recipe as Recipe>::Outputs {}
+// }
 
 /// A crafting slot in a machine of type `M`.
 #[derive(Debug)]
@@ -99,12 +110,38 @@ pub enum MachineStorage<M> {
     /// The machine is being constructed; just wait for it to be ready.
     InConstruction,
     /// The machine is there.
-    Present(Vec<M>),
+    Present(Vec<MachineWithQueue<M>>),
     /// We removed that machine; error when trying to craft.
     Removed,
 }
 
-impl<M> MachineStorage<M> {
+pub struct MachineWithQueue<M> {
+    pub machine: M,
+    /// Queue of items waiting for this machine to produce an output. Only the first item in the
+    /// queue polls the machine; the rest are each waiting on the next one to save on useless
+    /// polling.
+    pub queue: VecDeque<WakeHandleId>,
+}
+
+impl<M: Machine> MachineWithQueue<M> {
+    fn new(machine: M) -> Self {
+        Self {
+            machine,
+            queue: Default::default(),
+        }
+    }
+    pub fn add_inputs(&mut self, tick: &Tick, inputs: <M::Recipe as ConstRecipe>::BundledInputs) {
+        self.machine.add_bundled_inputs(tick, inputs);
+    }
+    pub fn get_outputs(
+        &mut self,
+        tick: &Tick,
+    ) -> Option<<M::Recipe as ConstRecipe>::BundledOutputs> {
+        self.machine.get_bundled_outputs(tick)
+    }
+}
+
+impl<M: Machine> MachineStorage<M> {
     pub fn is_present(&self) -> bool {
         matches!(self, Self::Present(vec) if !vec.is_empty())
     }
@@ -122,69 +159,58 @@ impl<M> MachineStorage<M> {
         let Self::Present(vec) = self else {
             unreachable!()
         };
-        vec.push(m);
+        vec.push(MachineWithQueue::new(m));
     }
-    // fn iter(&mut self) -> impl Iterator<Item = &mut M> {
-    //     match self {
-    //         Self::Present(vec) => Some(vec),
-    //         _ => None,
-    //     }
-    //     .into_iter()
-    //     .flatten()
-    // }
-    // fn max_load(&mut self, tick: &Tick) -> Option<(u32, &str)>
-    // where
-    //     M: Machine,
-    //     M::Recipe: ConstRecipe,
-    // {
-    //     self.iter()
-    //         .map(|m| (m.input_load(tick), m.type_name()))
-    //         .max()
-    // }
+    fn iter(&self) -> impl Iterator<Item = &MachineWithQueue<M>> {
+        match self {
+            Self::Present(vec) => Some(vec),
+            _ => None,
+        }
+        .into_iter()
+        .flatten()
+    }
+    #[expect(unused)]
+    fn iter_mut(&mut self) -> impl Iterator<Item = &mut MachineWithQueue<M>> {
+        match self {
+            Self::Present(vec) => Some(vec),
+            _ => None,
+        }
+        .into_iter()
+        .flatten()
+    }
+    /// Compute the total number of clients waiting for output.
+    pub fn total_load(&self) -> usize {
+        self.iter().map(|m| m.queue.len()).sum()
+    }
 
-    pub fn request(&mut self, tick: &Tick) -> Option<MachineSlot<M>>
-    where
-        M: Machine,
-    {
+    pub fn request(&mut self, _tick: &Tick) -> Option<MachineSlot<M>> {
         match self {
             Self::NoMachine | Self::InConstruction => None,
             // Find the least loaded machine
-            Self::Present(vec) => {
-                let res = vec
-                    .iter_mut()
-                    .map(|m| m.inputs(tick).input_count())
-                    .enumerate()
-                    .min_by_key(|(_, input_count)| *input_count)
-                    .map(|(id, _)| MachineSlot(id, PhantomData));
-                // if vec.len() > 1 {
-                //     let (min, max) = vec
-                //         .iter_mut()
-                //         .map(|m| m.inputs(tick).input_count())
-                //         .minmax_by_key(|input_count| *input_count)
-                //         .into_option()
-                //         .unwrap();
-                //     eprintln!(
-                //         "picked {:?} among {} {} ([{min}, {max}])",
-                //         res,
-                //         vec.len(),
-                //         std::any::type_name::<M>()
-                //     );
-                // }
-                res
-            }
+            Self::Present(vec) => vec
+                .iter_mut()
+                .map(|m| m.queue.len())
+                .enumerate()
+                .min_by_key(|(_, queue_len)| *queue_len)
+                .map(|(id, _)| MachineSlot(id, PhantomData)),
             Self::Removed => panic!("trying to craft with a removed {}", type_name::<M>()),
         }
     }
-    pub fn get(&mut self, id: MachineSlot<M>) -> &mut M {
+    pub fn get(&mut self, id: MachineSlot<M>) -> &mut MachineWithQueue<M> {
         match self {
             Self::Present(vec) => &mut vec[id.0],
             _ => panic!(),
         }
     }
-    pub fn take_map<N>(&mut self, f: impl Fn(M) -> N) -> MachineStorage<N> {
+    pub fn take_map<N: Machine>(&mut self, f: impl Fn(M) -> N) -> MachineStorage<N> {
         match mem::replace(self, Self::Removed) {
             Self::NoMachine | Self::InConstruction => MachineStorage::NoMachine,
-            Self::Present(vec) => MachineStorage::Present(vec.into_iter().map(f).collect()),
+            Self::Present(vec) => MachineStorage::Present(
+                vec.into_iter()
+                    .map(|m| f(m.machine))
+                    .map(MachineWithQueue::new)
+                    .collect(),
+            ),
             Self::Removed => MachineStorage::Removed,
         }
     }
