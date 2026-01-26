@@ -60,7 +60,7 @@ pub struct MachineStore {
     map: HashMap<TypeId, Box<dyn StoredMachine>>,
 }
 impl MachineStore {
-    pub fn get<M: Machine + Any>(&mut self) -> &mut MachineStorage<M> {
+    pub fn for_type<M: Machine + Any>(&mut self) -> &mut MachineStorage<M> {
         let storage: &mut (dyn StoredMachine + 'static) = self
             .map
             .entry(TypeId::of::<M>())
@@ -68,6 +68,9 @@ impl MachineStore {
             .as_mut();
         let storage: &mut (dyn Any + 'static) = storage;
         storage.downcast_mut().unwrap()
+    }
+    pub fn get<M: Machine + Any>(&mut self, id: MachineSlot<M>) -> &mut M {
+        self.for_type::<M>().get(id)
     }
     pub fn iter(&mut self) -> impl Iterator<Item = &mut dyn StoredMachine> {
         self.map.values_mut().map(|s| s.as_mut())

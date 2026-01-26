@@ -16,7 +16,7 @@ use rustorio_engine::research::TechRecipe;
 
 use crate::{
     GameState, Resources,
-    machine::{Machine, MachineInputs},
+    machine::{Machine, MachineInputs, MachineSlot},
     scheduler::WakeHandle,
 };
 
@@ -170,6 +170,12 @@ impl<A: Makeable, B: Makeable, C: Makeable> Makeable for (A, B, C) {
     }
 }
 
+impl<M: Machine + Any> Makeable for MachineSlot<M> {
+    fn make(state: &mut GameState) -> WakeHandle<Self> {
+        state.wait_for(move |s| s.resources.machine_store.for_type::<M>().request(&s.tick))
+    }
+}
+
 impl Makeable for SteelSmelting {
     fn make(state: &mut GameState) -> WakeHandle<Self> {
         if let Some(recipe) = state.resources.steel_smelting {
@@ -182,9 +188,9 @@ impl Makeable for SteelSmelting {
                 let lab = state
                     .resources
                     .machine_store
-                    .get::<Lab<SteelTechnology>>()
+                    .for_type::<Lab<SteelTechnology>>()
                     .take_map(|lab| lab.change_technology(&points_tech).unwrap());
-                *state.resources.machine_store.get() = lab;
+                *state.resources.machine_store.for_type() = lab;
                 state.resources.steel_smelting = Some(steel_smelting);
                 state.resources.points_technology = Some(points_tech);
                 steel_smelting
@@ -235,6 +241,17 @@ impl Makeable for Lab<SteelTechnology> {
         let inputs = state.make();
         state.map(inputs, move |state, (iron, copper)| {
             let tech = state.resources.steel_technology.as_ref().unwrap();
+            Lab::build(&state.tick, tech, iron, copper)
+        })
+    }
+}
+impl Makeable for Lab<PointsTechnology> {
+    fn make(state: &mut GameState) -> WakeHandle<Self> {
+        let inputs = state.make();
+        state.map(inputs, move |state, (iron, copper, steel_smelting)| {
+            // Wait for the steel smelting recipe, because it also sets up the points tech.
+            let _: SteelSmelting = steel_smelting;
+            let tech = state.resources.points_technology.as_ref().unwrap();
             Lab::build(&state.tick, tech, iron, copper)
         })
     }
@@ -308,12 +325,11 @@ impl BundleMakeable for CopperWire {
     }
     fn craft_many<const AMOUNT: u32>(state: &mut GameState) -> WakeHandle<Bundle<Self, AMOUNT>> {
         state.multiple(|state| {
-            let inputs = state.make();
-            state.then(inputs, |state, inputs| {
+            state.make_then(|state, inputs| {
                 if state
                     .resources
                     .machine_store
-                    .get::<Assembler<CopperWireRecipe>>()
+                    .for_type::<Assembler<CopperWireRecipe>>()
                     .is_present()
                 {
                     state.craft::<Assembler<CopperWireRecipe>, _>(inputs)
@@ -326,26 +342,22 @@ impl BundleMakeable for CopperWire {
 }
 impl BundleMakeable for RedScience {
     fn craft_one(state: &mut GameState) -> WakeHandle<Bundle<Self, 1>> {
-        let both = state.make();
-        state.then(both, |state, inputs| {
-            state.hand_craft::<_, RedScienceRecipe, _>(inputs)
-        })
+        state.make_then(|state, inputs| state.hand_craft::<_, RedScienceRecipe, _>(inputs))
     }
 }
 
 trait MachineMakeable: ResourceType + Any + Sized {
     type Machine: Machine<
-        Recipe: Recipe<Outputs = (Resource<Self>,)>
-                    + ConstRecipe<BundledInputs: Makeable, BundledOutputs = (Bundle<Self, 1>,)>,
-    >;
+            Recipe: Recipe<Outputs = (Resource<Self>,)>
+                        + ConstRecipe<BundledInputs: Makeable, BundledOutputs = (Bundle<Self, 1>,)>,
+        > + Makeable;
 }
 impl<R> BundleMakeable for R
 where
     R: MachineMakeable,
 {
     fn craft_one(state: &mut GameState) -> WakeHandle<Bundle<Self, 1>> {
-        let inputs = state.make();
-        state.then(inputs, |state, inputs| state.craft::<R::Machine, _>(inputs))
+        state.make_then(|state, inputs| state.craft::<R::Machine, _>(inputs))
     }
 }
 
@@ -366,6 +378,7 @@ impl MachineMakeable for Point {
 }
 impl<T: Technology + Any> MachineMakeable for ResearchPoint<T>
 where
+    Lab<T>: Makeable,
     TechRecipe<T>: Recipe<Inputs: MachineInputs, Outputs = (Resource<Self>,)>
         + ConstRecipe<BundledInputs: Makeable, BundledOutputs = (Bundle<Self, 1>,)>,
 {
@@ -399,13 +412,13 @@ impl GameState {
         T::make(self)
     }
 
-    /// Waits until the given resource has the required amount then returns that amount of
-    /// resource.
-    pub fn wait_for_resource<const AMOUNT: u32, R: ResourceType + Any>(
+    /// Schedules `f` to run after `h` completes, and returns a hendl to the final output.
+    pub fn make_then<T: Makeable, U: Any>(
         &mut self,
-        f: impl Fn(&mut GameState) -> &mut Resource<R> + 'static,
-    ) -> WakeHandle<Bundle<R, AMOUNT>> {
-        self.wait_for(move |state| f(state).bundle().ok())
+        f: impl FnOnce(&mut GameState, T) -> WakeHandle<U> + 'static,
+    ) -> WakeHandle<U> {
+        let x = self.make::<T>();
+        self.then(x, f)
     }
 
     /// Given a producer of a single bundle of an item, make a producer of a larger bundle.
@@ -419,26 +432,46 @@ impl GameState {
         self.map(sum, |_, mut sum| sum.bundle().unwrap())
     }
 
+    /// Waits until the given resource has the required amount then returns that amount of
+    /// resource.
+    pub fn wait_for_resource<const AMOUNT: u32, R: ResourceType + Any>(
+        &mut self,
+        f: impl Fn(&mut GameState) -> &mut Resource<R> + 'static,
+    ) -> WakeHandle<Bundle<R, AMOUNT>> {
+        self.wait_for(move |state| f(state).bundle().ok())
+    }
+
+    /// Waits until the selected machine has produced enough output.
+    /// This is the main wait point of our system.
+    fn wait_for_machine_output<M>(
+        &mut self,
+        machine_id: MachineSlot<M>,
+    ) -> WakeHandle<<M::Recipe as ConstRecipe>::BundledOutputs>
+    where
+        M: Machine + Makeable,
+        M::Recipe: ConstRecipe + Any,
+    {
+        self.wait_for(move |state| {
+            let machine = state.resources.machine_store.get(machine_id);
+            M::Recipe::get_outputs(&mut machine.outputs(&state.tick))
+        })
+    }
+
     /// Craft an item using the provided machine.
     pub fn craft<M, O>(
         &mut self,
         inputs: <M::Recipe as ConstRecipe>::BundledInputs,
     ) -> WakeHandle<O>
     where
-        M: Machine + Any,
+        M: Machine + Makeable,
         M::Recipe: ConstRecipe<BundledOutputs = (O,)> + Any,
         O: Any,
     {
-        let machine_id =
-            self.wait_for(move |s| s.resources.machine_store.get::<M>().request(&s.tick));
-        self.then(machine_id, move |state, machine_id| {
-            let machine = state.resources.machine_store.get::<M>().get(machine_id);
+        self.make_then(move |state, slot: MachineSlot<M>| {
+            let machine = state.resources.machine_store.get(slot);
             let machine_inputs = machine.inputs(&state.tick);
             M::Recipe::add_inputs(machine_inputs, inputs);
-            let out = state.wait_for(move |state| {
-                let machine = state.resources.machine_store.get::<M>().get(machine_id);
-                M::Recipe::get_outputs(&mut machine.outputs(&state.tick))
-            });
+            let out = state.wait_for_machine_output(slot);
             state.map(out, |_, out| out.0)
         })
     }
@@ -448,11 +481,12 @@ impl GameState {
         territory: fn(&mut Resources) -> &mut Territory<Ore>,
     ) -> WakeHandle<Bundle<Ore, 1>> {
         self.with_mut_tick(move |state, mut_token| {
-            let out: Bundle<Ore, 1> =
-                territory(&mut state.resources).hand_mine(state.tick.as_mut(mut_token));
-            state.resources.resource_store.get().add(out);
+            let t = territory(&mut state.resources);
+            let mut_tick = state.tick.as_mut(mut_token);
+            let out: Bundle<Ore, 1> = t.hand_mine(mut_tick);
+            t.resources(&state.tick).add(out);
         });
-        self.wait_for_resource(|state| state.resources.resource_store.get())
+        self.wait_for_resource(move |state| territory(&mut state.resources).resources(&state.tick))
     }
     fn hand_craft<
         const AMOUNT: u32,

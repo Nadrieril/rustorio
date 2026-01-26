@@ -1,4 +1,8 @@
-use std::{any::Any, mem};
+use std::{
+    any::{Any, type_name},
+    marker::PhantomData,
+    mem,
+};
 
 use rustorio::{
     Recipe, Resource, ResourceType, Technology, Tick,
@@ -76,14 +80,24 @@ impl<R1: ResourceType, R2: ResourceType> MachineInputs for (Resource<R1>, Resour
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct MachineId(usize);
+/// A crafting slot in a machine of type `M`.
+#[derive(Debug)]
+pub struct MachineSlot<M>(usize, PhantomData<M>);
+
+impl<M> Copy for MachineSlot<M> {}
+impl<M> Clone for MachineSlot<M> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
 
 #[derive(Default)]
 pub enum MachineStorage<M> {
     /// The machine isn't there; craft by hand.
     #[default]
     NoMachine,
+    /// The machine is being constructed; just wait for it to be ready.
+    InConstruction,
     /// The machine is there.
     Present(Vec<M>),
     /// We removed that machine; error when trying to craft.
@@ -92,7 +106,13 @@ pub enum MachineStorage<M> {
 
 impl<M> MachineStorage<M> {
     pub fn is_present(&self) -> bool {
-        matches!(self, Self::Present(_))
+        matches!(self, Self::Present(vec) if !vec.is_empty())
+    }
+    pub fn needs_construction(&self) -> bool {
+        match self {
+            MachineStorage::NoMachine => true,
+            _ => false,
+        }
     }
     pub fn add(&mut self, m: M) {
         eprintln!("adding a {}", std::any::type_name::<M>());
@@ -122,12 +142,12 @@ impl<M> MachineStorage<M> {
     //         .max()
     // }
 
-    pub fn request(&mut self, tick: &Tick) -> Option<MachineId>
+    pub fn request(&mut self, tick: &Tick) -> Option<MachineSlot<M>>
     where
         M: Machine,
     {
         match self {
-            Self::NoMachine => None,
+            Self::NoMachine | Self::InConstruction => None,
             // Find the least loaded machine
             Self::Present(vec) => {
                 let res = vec
@@ -135,7 +155,7 @@ impl<M> MachineStorage<M> {
                     .map(|m| m.inputs(tick).input_count())
                     .enumerate()
                     .min_by_key(|(_, input_count)| *input_count)
-                    .map(|(id, _)| MachineId(id));
+                    .map(|(id, _)| MachineSlot(id, PhantomData));
                 // if vec.len() > 1 {
                 //     let (min, max) = vec
                 //         .iter_mut()
@@ -152,10 +172,10 @@ impl<M> MachineStorage<M> {
                 // }
                 res
             }
-            Self::Removed => panic!("trying to craft with a removed machine"),
+            Self::Removed => panic!("trying to craft with a removed {}", type_name::<M>()),
         }
     }
-    pub fn get(&mut self, id: MachineId) -> &mut M {
+    pub fn get(&mut self, id: MachineSlot<M>) -> &mut M {
         match self {
             Self::Present(vec) => &mut vec[id.0],
             _ => panic!(),
@@ -163,7 +183,7 @@ impl<M> MachineStorage<M> {
     }
     pub fn take_map<N>(&mut self, f: impl Fn(M) -> N) -> MachineStorage<N> {
         match mem::replace(self, Self::Removed) {
-            Self::NoMachine => MachineStorage::NoMachine,
+            Self::NoMachine | Self::InConstruction => MachineStorage::NoMachine,
             Self::Present(vec) => MachineStorage::Present(vec.into_iter().map(f).collect()),
             Self::Removed => MachineStorage::Removed,
         }
@@ -187,9 +207,14 @@ impl GameState {
     }
 
     pub fn add_machine<M: Machine + Makeable>(&mut self) -> WakeHandle<()> {
+        let machine_store = self.resources.machine_store.for_type::<M>();
+        if machine_store.needs_construction() {
+            // Avoid double-creating the first machine.
+            *machine_store = MachineStorage::InConstruction;
+        }
         let machine = self.make();
         self.map(machine, move |state, machine: M| {
-            state.resources.machine_store.get().add(machine);
+            state.resources.machine_store.for_type().add(machine);
         })
     }
     pub fn add_assembler<R>(&mut self) -> WakeHandle<()>
