@@ -3,10 +3,11 @@ use std::{
     collections::VecDeque,
     marker::PhantomData,
     mem,
+    ops::ControlFlow,
 };
 
 use rustorio::{
-    Bundle, Recipe, ResourceType, Technology, Tick,
+    Bundle, HandRecipe, Recipe, ResourceType, Technology, Tick,
     buildings::{Assembler, Furnace, Lab},
     recipes::{AssemblerRecipe, FurnaceRecipe},
     territory::{Miner, Territory},
@@ -36,6 +37,10 @@ pub trait Machine: Any {
         tick: &Tick,
     ) -> Option<<Self::Recipe as ConstRecipe>::BundledOutputs> {
         Self::Recipe::get_outputs(&mut self.outputs(tick))
+    }
+    /// Used when we handcrafted some values, to have somewhere to store them.
+    fn add_outputs(&mut self, tick: &Tick, outputs: <Self::Recipe as ConstRecipe>::BundledOutputs) {
+        Self::Recipe::add_outputs(self.outputs(tick), outputs);
     }
 }
 
@@ -70,42 +75,28 @@ where
     }
 }
 
-// /// `Miners` don't quite work like machines but it would be super nice to integrate them in our
-// /// load balancing setup, so for each miner we add a corresponding miner-machine that serves as
-// /// interface. Making a new one of these will add a miner to the right territory.
-// struct IronOreMachine(Rc<RefCell<Territory<IronOre>>>);
+/// Fake machine that represents handcrafting. We don't actually construct one of these; instead we
+/// rely on the handcrafting capabilities of `MachineStorage`.
+pub struct HandCrafter<R>(PhantomData<R>);
 
-// struct IronMiningRecipe;
-// impl Recipe for IronMiningRecipe {}
-
-// impl Machine for IronOreMachine {
-//     type Recipe = IronMiningRecipe;
-
-//     fn inputs(&mut self, tick: &Tick) -> &mut <Self::Recipe as Recipe>::Inputs {
-//         todo!()
-//     }
-
-//     fn outputs(&mut self, tick: &Tick) -> &mut <Self::Recipe as Recipe>::Outputs {}
-// }
-
-/// A crafting slot in a machine of type `M`.
-#[derive(Debug)]
-pub struct MachineSlot<M>(usize, PhantomData<M>);
-
-impl<M> Copy for MachineSlot<M> {}
-impl<M> Clone for MachineSlot<M> {
-    fn clone(&self) -> Self {
-        *self
+impl<R: HandRecipe + ConstRecipe + Any> Machine for HandCrafter<R> {
+    type Recipe = R;
+    fn inputs(&mut self, _tick: &Tick) -> &mut <Self::Recipe as Recipe>::Inputs {
+        todo!()
+    }
+    fn outputs(&mut self, _tick: &Tick) -> &mut <Self::Recipe as Recipe>::Outputs {
+        todo!()
     }
 }
 
-#[derive(Default)]
-pub enum MachineStorage<M> {
+pub enum MachineStorage<M: Machine> {
     /// The machine isn't there; craft by hand.
-    #[default]
-    NoMachine,
-    /// The machine is being constructed; just wait for it to be ready.
-    InConstruction,
+    NoMachine {
+        /// Inputs gathered while there was no constructed machine.
+        inputs: Vec<<M::Recipe as ConstRecipe>::BundledInputs>,
+        /// Outputs handcrafted while there was no constructed machine (if relevant).
+        outputs: Vec<<M::Recipe as ConstRecipe>::BundledOutputs>,
+    },
     /// The machine is there.
     Present(Vec<M>),
     /// We removed that machine; error when trying to craft.
@@ -116,55 +107,69 @@ impl<M: Machine> MachineStorage<M> {
     pub fn is_present(&self) -> bool {
         matches!(self, Self::Present(vec) if !vec.is_empty())
     }
-    pub fn needs_construction(&self) -> bool {
+    pub fn add(&mut self, tick: &Tick, mut m: M) {
+        println!("adding a {}", std::any::type_name::<M>());
         match self {
-            MachineStorage::NoMachine => true,
-            _ => false,
+            MachineStorage::NoMachine { inputs, outputs } => {
+                for input in mem::take(inputs) {
+                    m.add_inputs(tick, input);
+                }
+                for output in mem::take(outputs) {
+                    m.add_outputs(tick, output);
+                }
+                *self = Self::Present(vec![m])
+            }
+            MachineStorage::Present(items) => items.push(m),
+            MachineStorage::Removed => {
+                panic!("trying to craft with a removed {}", type_name::<M>())
+            }
         }
-    }
-    pub fn add(&mut self, m: M) {
-        eprintln!("adding a {}", std::any::type_name::<M>());
-        if !self.is_present() {
-            *self = Self::Present(vec![])
-        }
-        let Self::Present(vec) = self else {
-            unreachable!()
-        };
-        vec.push(m);
-    }
-    fn iter_mut(&mut self) -> impl Iterator<Item = &mut M> {
-        match self {
-            Self::Present(vec) => Some(vec),
-            _ => None,
-        }
-        .into_iter()
-        .flatten()
     }
 
-    pub fn request(&mut self, tick: &Tick) -> Option<MachineSlot<M>> {
+    pub fn add_inputs(&mut self, tick: &Tick, input: <M::Recipe as ConstRecipe>::BundledInputs) {
         match self {
-            Self::NoMachine | Self::InConstruction => None,
+            Self::NoMachine { inputs, .. } => inputs.push(input),
             // Find the least loaded machine
-            Self::Present(vec) => vec
-                .iter_mut()
-                .map(|m| m.input_load(tick))
-                .enumerate()
-                .min_by_key(|(_, queue_len)| *queue_len)
-                .map(|(id, _)| MachineSlot(id, PhantomData)),
+            Self::Present(vec) => {
+                vec.iter_mut()
+                    .map(|m| (m.input_load(tick), m))
+                    .min_by_key(|&(load, _)| load)
+                    .map(|(_, m)| m)
+                    .unwrap()
+                    .add_inputs(tick, input);
+            }
             Self::Removed => panic!("trying to craft with a removed {}", type_name::<M>()),
-        }
-    }
-    pub fn get(&mut self, id: MachineSlot<M>) -> &mut M {
-        match self {
-            Self::Present(vec) => &mut vec[id.0],
-            _ => panic!(),
         }
     }
     pub fn take_map<N: Machine>(&mut self, f: impl Fn(M) -> N) -> MachineStorage<N> {
         match mem::replace(self, Self::Removed) {
-            Self::NoMachine | Self::InConstruction => MachineStorage::NoMachine,
+            Self::NoMachine { .. } => MachineStorage::default(),
             Self::Present(vec) => MachineStorage::Present(vec.into_iter().map(|m| f(m)).collect()),
             Self::Removed => MachineStorage::Removed,
+        }
+    }
+
+    fn poll(&mut self, tick: &Tick) -> Option<<M::Recipe as ConstRecipe>::BundledOutputs> {
+        match self {
+            MachineStorage::NoMachine { outputs, .. } => outputs.pop(),
+            MachineStorage::Present(machines) => {
+                for m in machines {
+                    if let Some(o) = m.get_outputs(tick) {
+                        return Some(o);
+                    }
+                }
+                None
+            }
+            MachineStorage::Removed => None,
+        }
+    }
+}
+
+impl<M: Machine> Default for MachineStorage<M> {
+    fn default() -> Self {
+        Self::NoMachine {
+            inputs: Default::default(),
+            outputs: Default::default(),
         }
     }
 }
@@ -188,46 +193,52 @@ where
 {
     type Output = <M::Recipe as ConstRecipe>::BundledOutputs;
     fn poll(&mut self, tick: &Tick) -> Option<Self::Output> {
-        for m in self.iter_mut() {
-            if let Some(o) = m.get_outputs(tick) {
-                return Some(o);
-            }
-        }
-        None
+        self.poll(tick)
     }
 }
+
+/// Token indicating that an operation caused the tick to advance.
+pub struct AdvancedTick;
 
 /// A producer that can be run by hand if needed.
 pub trait HandProducer: Producer {
     /// Whether the producer has the right machines to produce output automatically.
     fn can_craft_automatically(&self) -> bool;
-    /// Run the producer by hand once.
-    fn craft_by_hand(&mut self, tick: &mut Tick);
+    /// Run the producer by hand once. Returns whether we advanced the tick.
+    fn craft_by_hand(&mut self, tick: &mut Tick) -> ControlFlow<AdvancedTick>;
 }
 
 impl<Ore: ResourceType + Any> HandProducer for Territory<Ore> {
     fn can_craft_automatically(&self) -> bool {
         self.num_miners() > 0
     }
-    fn craft_by_hand(&mut self, tick: &mut Tick) {
+    fn craft_by_hand(&mut self, tick: &mut Tick) -> ControlFlow<AdvancedTick> {
         let out = self.hand_mine::<1>(tick);
         self.resources(tick).add(out);
+        ControlFlow::Break(AdvancedTick)
     }
 }
-// impl<M: Machine> HandProducer for MachineStorage<M> {
-//     fn can_craft_automatically(&self) -> bool {
-//         self.is_present()
-//     }
-//     fn craft_by_hand(&mut self, tick: &mut Tick) {
-//         // TODO: problem is getting inputs and storing outputs
-//         todo!()
-//         // let out = self.hand_mine::<1>(tick);
-//         // self.resources(tick).add(out);
-
-//         //     let out = M::Recipe::craft(tick, inputs);
-//         //     self.resources.resource_store.get().add(out);
-//     }
-// }
+impl<M> HandProducer for MachineStorage<M>
+where
+    M: Machine,
+    M::Recipe: HandRecipe<InputBundle = <M::Recipe as ConstRecipe>::BundledInputs>,
+    M::Recipe: HandRecipe<OutputBundle = <M::Recipe as ConstRecipe>::BundledOutputs>,
+{
+    fn can_craft_automatically(&self) -> bool {
+        self.is_present()
+    }
+    fn craft_by_hand(&mut self, tick: &mut Tick) -> ControlFlow<AdvancedTick> {
+        let Self::NoMachine { inputs, outputs } = self else {
+            panic!("can't craft by hand?")
+        };
+        let Some(input) = inputs.pop() else {
+            return ControlFlow::Continue(());
+        };
+        let out = M::Recipe::craft(tick, input);
+        outputs.push(out);
+        ControlFlow::Break(AdvancedTick)
+    }
+}
 
 /// A producer along with a queue of items waiting on it.
 pub struct ProducerWithQueue<P: Producer> {
@@ -263,16 +274,15 @@ impl<P: Producer> ProducerWithQueue<P> {
     }
 
     /// If the producer has a non-empty queue and can't produce output automatically, craft by hand
-    /// instead.
-    pub fn craft_by_hand_if_needed(&mut self, tick: &mut Tick) -> bool
+    /// instead. Return whether we advanced the time.
+    pub fn craft_by_hand_if_needed(&mut self, tick: &mut Tick) -> ControlFlow<AdvancedTick>
     where
         P: HandProducer,
     {
         if !self.producer.can_craft_automatically() && !self.queue.is_empty() {
-            self.producer.craft_by_hand(tick);
-            true
+            self.producer.craft_by_hand(tick)
         } else {
-            false
+            ControlFlow::Continue(())
         }
     }
 }
@@ -293,11 +303,6 @@ impl GameState {
     }
 
     pub fn add_machine<M: Machine + Makeable>(&mut self) -> WakeHandle<()> {
-        let machine_store = &mut self.resources.machine_store.for_type::<M>().producer;
-        if machine_store.needs_construction() {
-            // Avoid double-creating the first machine.
-            *machine_store = MachineStorage::InConstruction;
-        }
         let machine = self.make();
         self.map(machine, move |state, machine: M| {
             state
@@ -305,7 +310,7 @@ impl GameState {
                 .machine_store
                 .for_type()
                 .producer
-                .add(machine);
+                .add(&state.tick, machine);
         })
     }
     pub fn add_assembler<R>(&mut self) -> WakeHandle<()>

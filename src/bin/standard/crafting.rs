@@ -1,8 +1,8 @@
-use std::any::{Any, type_name};
+use std::any::Any;
 
 use itertools::Itertools;
 use rustorio::{
-    Bundle, HandRecipe, Recipe, ResearchPoint, Resource, ResourceType, Technology,
+    Bundle, Recipe, ResearchPoint, Resource, ResourceType, Technology,
     buildings::{Assembler, Furnace, Lab},
     recipes::{
         AssemblerRecipe, CopperSmelting, CopperWireRecipe, ElectronicCircuitRecipe, FurnaceRecipe,
@@ -15,7 +15,7 @@ use rustorio_engine::research::TechRecipe;
 
 use crate::{
     GameState,
-    machine::{Machine, MachineSlot, ProducerWithQueue},
+    machine::{HandCrafter, Machine, ProducerWithQueue},
     scheduler::WakeHandle,
 };
 
@@ -37,6 +37,8 @@ pub trait ConstRecipeImpl<const INPUT_N: u32>: Recipe {
     type BundledOutputs_;
     fn add_inputs(to: &mut Self::Inputs, i: Self::BundledInputs_);
     fn get_outputs(from: &mut Self::Outputs) -> Option<Self::BundledOutputs_>;
+    /// Used when we handcrafted some values, to have somewhere to store them.
+    fn add_outputs(to: &mut Self::Outputs, o: Self::BundledOutputs_);
     /// Count the number of recipe instances left in this input bundle.
     fn input_load(input: &Self::Inputs) -> u32;
 }
@@ -57,6 +59,9 @@ where
     }
     fn get_outputs(from: &mut Self::Outputs) -> Option<Self::BundledOutputs_> {
         Some((from.0.bundle().ok()?,))
+    }
+    fn add_outputs(to: &mut Self::Outputs, o: Self::BundledOutputs_) {
+        to.0.add(o.0);
     }
     fn input_load(input: &Self::Inputs) -> u32 {
         input.0.amount() / R::INPUT_AMOUNTS.0
@@ -86,6 +91,9 @@ where
     fn get_outputs(from: &mut Self::Outputs) -> Option<Self::BundledOutputs_> {
         Some((from.0.bundle().ok()?,))
     }
+    fn add_outputs(to: &mut Self::Outputs, o: Self::BundledOutputs_) {
+        to.0.add(o.0);
+    }
     fn input_load(input: &Self::Inputs) -> u32 {
         input.0.amount() / R::INPUT_AMOUNTS.0
     }
@@ -114,10 +122,13 @@ impl InputN for TechRecipe<SteelTechnology> {
 impl InputN for TechRecipe<PointsTechnology> {
     const INPUT_N: u32 = 1;
 }
-impl InputN for PointRecipe {
+impl InputN for ElectronicCircuitRecipe {
     const INPUT_N: u32 = 2;
 }
-impl InputN for ElectronicCircuitRecipe {
+impl InputN for RedScienceRecipe {
+    const INPUT_N: u32 = 2;
+}
+impl InputN for PointRecipe {
     const INPUT_N: u32 = 2;
 }
 
@@ -127,6 +138,8 @@ pub trait ConstRecipe: Recipe + InputN + Any {
     type BundledOutputs;
     fn add_inputs(to: &mut Self::Inputs, i: Self::BundledInputs);
     fn get_outputs(from: &mut Self::Outputs) -> Option<Self::BundledOutputs>;
+    /// Used when we handcrafted some values, to have somewhere to store them.
+    fn add_outputs(to: &mut Self::Outputs, o: Self::BundledOutputs);
     /// Count the number of recipe instances left in this input bundle.
     fn input_load(input: &Self::Inputs) -> u32;
 }
@@ -141,6 +154,9 @@ impl<R: Recipe + InputN + Any + ConstRecipeImpl<{ R::INPUT_N }>> ConstRecipe for
     }
     fn input_load(input: &Self::Inputs) -> u32 {
         <R as ConstRecipeImpl<{ R::INPUT_N }>>::input_load(input)
+    }
+    fn add_outputs(to: &mut Self::Outputs, o: Self::BundledOutputs) {
+        <R as ConstRecipeImpl<{ R::INPUT_N }>>::add_outputs(to, o)
     }
 }
 
@@ -166,18 +182,6 @@ impl<A: Makeable, B: Makeable, C: Makeable> Makeable for (A, B, C) {
         let b = B::make(state);
         let c = C::make(state);
         state.triple(a, b, c)
-    }
-}
-
-impl<M: Machine> Makeable for MachineSlot<M> {
-    fn make(state: &mut GameState) -> WakeHandle<Self> {
-        state.wait_for(move |s| {
-            s.resources
-                .machine_store
-                .for_type::<M>()
-                .producer
-                .request(&s.tick)
-        })
     }
 }
 
@@ -297,33 +301,16 @@ impl BundleMakeable for CopperWire {
     }
     fn craft_many<const AMOUNT: u32>(state: &mut GameState) -> WakeHandle<Bundle<Self, AMOUNT>> {
         state.multiple(|state| {
-            state.make_then(|state, inputs| {
-                if state
-                    .resources
-                    .machine_store
-                    .for_type::<Assembler<CopperWireRecipe>>()
-                    .producer
-                    .is_present()
-                {
-                    state.craft::<Assembler<CopperWireRecipe>, _>(inputs)
-                } else {
-                    state.hand_craft::<_, CopperWireRecipe, _>(inputs)
-                }
-            })
+            state.make_then(|state, inputs| state.craft::<Assembler<CopperWireRecipe>, _>(inputs))
         })
-    }
-}
-impl BundleMakeable for RedScience {
-    fn craft_one(state: &mut GameState) -> WakeHandle<Bundle<Self, 1>> {
-        state.make_then(|state, inputs| state.hand_craft::<_, RedScienceRecipe, _>(inputs))
     }
 }
 
 trait MachineMakeable: ResourceType + Any + Sized {
     type Machine: Machine<
-            Recipe: Recipe<Outputs = (Resource<Self>,)>
-                        + ConstRecipe<BundledInputs: Makeable, BundledOutputs = (Bundle<Self, 1>,)>,
-        > + Makeable;
+        Recipe: Recipe<Outputs = (Resource<Self>,)>
+                    + ConstRecipe<BundledInputs: Makeable, BundledOutputs = (Bundle<Self, 1>,)>,
+    >;
 }
 impl<R> BundleMakeable for R
 where
@@ -356,6 +343,9 @@ where
         + ConstRecipe<BundledInputs: Makeable, BundledOutputs = (Bundle<Self, 1>,)>,
 {
     type Machine = Lab<T>;
+}
+impl MachineMakeable for RedScience {
+    type Machine = HandCrafter<RedScienceRecipe>;
 }
 
 trait ConstMakeable {
@@ -411,36 +401,16 @@ impl GameState {
         inputs: <M::Recipe as ConstRecipe>::BundledInputs,
     ) -> WakeHandle<O>
     where
-        M: Machine + Makeable,
+        M: Machine,
         M::Recipe: ConstRecipe<BundledOutputs = (O,)> + Any,
         O: Any,
     {
-        self.make_then(move |state, slot: MachineSlot<M>| {
-            state
-                .resources
-                .machine_store
-                .for_type::<M>()
-                .producer
-                .get(slot)
-                .add_inputs(&state.tick, inputs);
-            let out = state.wait_for_producer_output(|r| r.machine_store.for_type::<M>());
-            state.map(out, |_, out| out.0)
-        })
-    }
-
-    fn hand_craft<
-        const AMOUNT: u32,
-        R: HandRecipe<OutputBundle = (Bundle<O, AMOUNT>,)> + Any,
-        O: ResourceType + Any,
-    >(
-        &mut self,
-        inputs: R::InputBundle,
-    ) -> WakeHandle<Bundle<O, AMOUNT>> {
-        self.with_mut_tick(|state, mut_token| {
-            eprintln!("handcrafting {}", type_name::<O>());
-            let out = R::craft(state.tick.as_mut(mut_token), inputs).0;
-            state.resources.resource_store.get().add(out);
-        });
-        self.wait_for(move |state| state.resources.resource_store.get().bundle().ok())
+        self.resources
+            .machine_store
+            .for_type::<M>()
+            .producer
+            .add_inputs(&self.tick, inputs);
+        let out = self.wait_for_producer_output(|r| r.machine_store.for_type::<M>());
+        self.map(out, |_, out| out.0)
     }
 }

@@ -4,14 +4,16 @@
 use std::{
     any::{Any, TypeId},
     collections::HashMap,
+    ops::ControlFlow,
 };
 
 use rustorio::{
     self, Bundle, Resource, ResourceType, Tick,
+    buildings::Assembler,
     gamemodes::Standard,
     recipes::{
         CopperSmelting, CopperWireRecipe, ElectronicCircuitRecipe, IronSmelting, PointRecipe,
-        SteelSmelting,
+        RedScienceRecipe, SteelSmelting,
     },
     research::{PointsTechnology, SteelTechnology},
     resources::{CopperOre, IronOre, Point},
@@ -92,10 +94,10 @@ impl<P: Producer> ErasedProducer for ProducerWithQueue<P> {
 }
 
 pub trait ErasedHandProducer: Any {
-    fn craft_by_hand_if_needed(&mut self, tick: &mut Tick) -> bool;
+    fn craft_by_hand_if_needed(&mut self, tick: &mut Tick) -> ControlFlow<AdvancedTick>;
 }
 impl<P: HandProducer> ErasedHandProducer for ProducerWithQueue<P> {
-    fn craft_by_hand_if_needed(&mut self, tick: &mut Tick) -> bool {
+    fn craft_by_hand_if_needed(&mut self, tick: &mut Tick) -> ControlFlow<AdvancedTick> {
         self.craft_by_hand_if_needed(tick)
     }
 }
@@ -142,6 +144,19 @@ impl Resources {
                     .map(|x| x as &mut dyn ErasedProducer),
             )
             .chain(self.machine_store.iter())
+    }
+
+    pub fn with_hand_producers(
+        &mut self,
+        mut f: impl FnMut(&mut dyn ErasedHandProducer) -> ControlFlow<AdvancedTick>,
+    ) -> ControlFlow<AdvancedTick> {
+        f(self.iron_territory.as_mut().unwrap())?;
+        f(self.copper_territory.as_mut().unwrap())?;
+        f(self.machine_store.for_type::<Assembler<CopperWireRecipe>>())?;
+        f(self
+            .machine_store
+            .for_type::<HandCrafter<RedScienceRecipe>>())?;
+        ControlFlow::Continue(())
     }
 }
 

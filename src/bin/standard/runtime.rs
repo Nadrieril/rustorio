@@ -1,10 +1,14 @@
-use std::{any::Any, collections::VecDeque, ops::Deref};
+use std::{
+    any::Any,
+    ops::{ControlFlow, Deref},
+};
 
 use itertools::Itertools;
 use rustorio::Tick;
 
 use crate::{
     Resources, StartingResources,
+    machine::AdvancedTick,
     scheduler::{WaiterQueue, WakeHandle},
 };
 
@@ -36,9 +40,6 @@ impl<T> Deref for RestrictMut<T> {
 pub struct GameState {
     pub tick: RestrictMut<Tick>,
     last_reported_tick: u64,
-    /// Advancing time during the waiter updates risks skipping updates. So instead we require that
-    /// jobs which need mutable ownership of the `Tick` be put in a separate queue.
-    mut_tick_queue: VecDeque<Box<dyn FnOnce(&mut GameState, RestrictMutToken)>>,
     pub resources: Resources,
     pub queue: WaiterQueue,
 }
@@ -49,7 +50,6 @@ impl GameState {
         GameState {
             tick: RestrictMut::new(tick),
             last_reported_tick: 0,
-            mut_tick_queue: Default::default(),
             queue: Default::default(),
             resources: Resources::new(starting_resources),
         }
@@ -58,26 +58,14 @@ impl GameState {
     pub fn tick(&self) -> &Tick {
         &self.tick
     }
-    /// Enqueue an operation that requires advancing the tick time. It will be executed inside
-    /// `tick_fwd` instead of plainly advancing the tick.
-    pub fn with_mut_tick(&mut self, f: impl FnOnce(&mut GameState, RestrictMutToken) + Any) {
-        self.mut_tick_queue.push_back(Box::new(f))
-    }
     pub fn tick_fwd(&mut self) {
         let mut_token = RestrictMutToken(()); // Only place where we create one.
 
-        let iron_territory = self.resources.iron_territory.as_mut().unwrap();
-        let copper_territory = self.resources.copper_territory.as_mut().unwrap();
-        if iron_territory.craft_by_hand_if_needed(self.tick.as_mut(RestrictMutToken(()))) {
-            println!("handcrafting iron ore");
-            // The tick has advanced
-        } else if copper_territory.craft_by_hand_if_needed(self.tick.as_mut(RestrictMutToken(()))) {
-            println!("handcrafting copper ore");
-            // The tick has advanced
-        } else if let Some(f) = self.mut_tick_queue.pop_front() {
-            f(self, mut_token)
-        } else {
-            self.tick.as_mut(mut_token).advance();
+        match self.resources.with_hand_producers(|p| {
+            p.craft_by_hand_if_needed(self.tick.as_mut(RestrictMutToken(())))
+        }) {
+            ControlFlow::Break(AdvancedTick) => {}
+            ControlFlow::Continue(()) => self.tick.as_mut(mut_token).advance(),
         }
 
         self.check_waiters();
