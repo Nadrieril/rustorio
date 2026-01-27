@@ -229,6 +229,24 @@ impl<Ore: ResourceType + Any> Producer for Territory<Ore> {
     }
 }
 
+/// A producer that can be run by hand if needed.
+pub trait HandProducer: Producer {
+    /// Whether the producer has the right machines to produce output automatically.
+    fn can_craft_automatically(&self) -> bool;
+    /// Run the producer by hand once.
+    fn craft_by_hand(&mut self, tick: &mut Tick);
+}
+
+impl<Ore: ResourceType + Any> HandProducer for Territory<Ore> {
+    fn can_craft_automatically(&self) -> bool {
+        self.num_miners() > 0
+    }
+    fn craft_by_hand(&mut self, tick: &mut Tick) {
+        let out = self.hand_mine::<1>(tick);
+        self.resources(tick).add(out);
+    }
+}
+
 /// A producer along with a queue of items waiting on it.
 pub struct ProducerWithQueue<P: Producer> {
     pub producer: P,
@@ -259,6 +277,20 @@ impl<P: Producer> ProducerWithQueue<P> {
         {
             let h = self.queue.pop_front().unwrap();
             waiters.set_output(h, output);
+        }
+    }
+
+    /// If the producer has a non-empty queue and can't produce output automatically, craft by hand
+    /// instead.
+    pub fn craft_by_hand_if_needed(&mut self, tick: &mut Tick) -> bool
+    where
+        P: HandProducer,
+    {
+        if !self.producer.can_craft_automatically() && !self.queue.is_empty() {
+            self.producer.craft_by_hand(tick);
+            true
+        } else {
+            false
         }
     }
 }

@@ -275,36 +275,12 @@ impl<const AMOUNT: u32, R: BundleMakeable> Makeable for Bundle<R, AMOUNT> {
 
 impl BundleMakeable for IronOre {
     fn craft_one(state: &mut GameState) -> WakeHandle<Bundle<Self, 1>> {
-        if state
-            .resources
-            .iron_territory
-            .as_ref()
-            .unwrap()
-            .producer
-            .num_miners()
-            == 0
-        {
-            state.hand_mine(|r| &mut r.iron_territory.as_mut().unwrap().producer)
-        } else {
-            state.wait_for_producer_output(|s| s.iron_territory.as_mut().unwrap())
-        }
+        state.wait_for_producer_output(|s| s.iron_territory.as_mut().unwrap())
     }
 }
 impl BundleMakeable for CopperOre {
     fn craft_one(state: &mut GameState) -> WakeHandle<Bundle<Self, 1>> {
-        if state
-            .resources
-            .copper_territory
-            .as_ref()
-            .unwrap()
-            .producer
-            .num_miners()
-            == 0
-        {
-            state.hand_mine(|r| &mut r.copper_territory.as_mut().unwrap().producer)
-        } else {
-            state.wait_for_producer_output(|s| s.copper_territory.as_mut().unwrap())
-        }
+        state.wait_for_producer_output(|s| s.copper_territory.as_mut().unwrap())
     }
 }
 impl BundleMakeable for CopperWire {
@@ -450,18 +426,6 @@ impl GameState {
         })
     }
 
-    fn hand_mine<Ore: ResourceType + Any>(
-        &mut self,
-        territory: fn(&mut Resources) -> &mut Territory<Ore>,
-    ) -> WakeHandle<Bundle<Ore, 1>> {
-        self.with_mut_tick(move |state, mut_token| {
-            let t = territory(&mut state.resources);
-            let mut_tick = state.tick.as_mut(mut_token);
-            let out: Bundle<Ore, 1> = t.hand_mine(mut_tick);
-            t.resources(&state.tick).add(out);
-        });
-        self.wait_for_resource(move |state| territory(&mut state.resources).resources(&state.tick))
-    }
     fn hand_craft<
         const AMOUNT: u32,
         R: HandRecipe<OutputBundle = (Bundle<O, AMOUNT>,)> + Any,

@@ -1,7 +1,7 @@
 use std::{any::Any, collections::VecDeque, ops::Deref};
 
 use itertools::Itertools;
-use rustorio::Tick;
+use rustorio::{Bundle, Tick};
 
 use crate::{
     Resources, StartingResources,
@@ -64,15 +64,24 @@ impl GameState {
         self.mut_tick_queue.push_back(Box::new(f))
     }
     pub fn tick_fwd(&mut self) {
-        let mut_token = RestrictMutToken(());
-        if let Some(f) = self.mut_tick_queue.pop_front() {
+        let mut_token = RestrictMutToken(()); // Only place where we create one.
+
+        let iron_territory = self.resources.iron_territory.as_mut().unwrap();
+        let copper_territory = self.resources.copper_territory.as_mut().unwrap();
+        if iron_territory.craft_by_hand_if_needed(self.tick.as_mut(RestrictMutToken(()))) {
+            // The tick has advanced
+        } else if copper_territory.craft_by_hand_if_needed(self.tick.as_mut(RestrictMutToken(()))) {
+            // The tick has advanced
+        } else if let Some(f) = self.mut_tick_queue.pop_front() {
             f(self, mut_token)
         } else {
             self.tick.as_mut(mut_token).advance();
         }
+
         self.check_waiters();
         self.report_loads();
     }
+
     pub fn report_loads(&mut self) {
         if self.tick.cur() / 50 == self.last_reported_tick / 50 {
             return;
@@ -91,6 +100,7 @@ impl GameState {
             .format("");
         eprintln!("{}:\n{}", self.tick.as_ref(), loads)
     }
+
     pub fn complete<R: Any>(&mut self, h: WakeHandle<R>) -> R {
         loop {
             if let Some(ret) = self.queue.get(h) {
