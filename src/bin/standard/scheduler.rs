@@ -7,7 +7,7 @@ use std::{
 };
 
 use indexmap::{IndexMap, map::Entry};
-use rustorio::{Bundle, Resource, ResourceType};
+use rustorio::{Resource, ResourceType};
 
 use crate::{
     GameState, Resources,
