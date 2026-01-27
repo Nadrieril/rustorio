@@ -11,8 +11,7 @@ use rustorio::{Bundle, Resource, ResourceType};
 
 use crate::{
     GameState, Resources,
-    crafting::{ConstRecipe, Makeable},
-    machine::{Machine, MachineSlot, Producer, ProducerWithQueue},
+    machine::{Producer, ProducerWithQueue},
 };
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
@@ -128,7 +127,7 @@ impl WaiterQueue {
         self.enqueue_waiter_with(|_| w)
     }
     /// Enqueues a waiter and returns a handle to wait for it.
-    pub fn enqueue_waiter_with<W: Waiter + 'static>(
+    fn enqueue_waiter_with<W: Waiter + 'static>(
         &mut self,
         f: impl FnOnce(WakeHandleId) -> W,
     ) -> WakeHandle<W::Output> {
@@ -223,21 +222,15 @@ impl GameState {
     }
 
     pub fn check_waiters(&mut self) {
-        self.resources
-            .iron_territory
-            .as_mut()
-            .unwrap()
-            .update(&self.tick, &mut self.queue);
-        self.resources
-            .copper_territory
-            .as_mut()
-            .unwrap()
-            .update(&self.tick, &mut self.queue);
+        for m in self.resources.producers() {
+            m.update(&self.tick, &mut self.queue);
+        }
         self.queue.enqueue_waiters_for_update();
         while let Some(handle) = self.queue.next_waiter_to_update() {
             self.check_waiter(handle);
         }
     }
+
     fn check_waiter(&mut self, handle: WakeHandleId) -> Option<()> {
         let mut w = mem::take(self.queue.waiters.get_mut(&handle)?);
         if let WaiterState::Waiting {
@@ -270,6 +263,7 @@ impl GameState {
         *self.queue.waiters.get_mut(&handle).unwrap() = w;
         Some(())
     }
+
     /// Poll that waiter to get its value if it is ready.
     fn poll_waiter<T: Any>(&mut self, handle: WakeHandle<T>) -> Poll<T> {
         let _ = self.check_waiter(handle.id);
@@ -420,96 +414,6 @@ impl GameState {
             }
         }
         self.enqueue_waiter(W(f))
-    }
-
-    /// Waits for the selected machine to produce a single output bundle.
-    /// This is the main wait point of our system.
-    pub fn wait_for_machine_output<M>(
-        &mut self,
-        slot: MachineSlot<M>,
-    ) -> WakeHandle<<M::Recipe as ConstRecipe>::BundledOutputs>
-    where
-        M: Machine + Makeable,
-        M::Recipe: ConstRecipe + Any,
-    {
-        struct W<M>(MachineSlot<M>, WakeHandleId);
-
-        impl<M> Waiter for W<M>
-        where
-            M: Machine + Makeable,
-            M::Recipe: ConstRecipe + Any,
-        {
-            type Output = <M::Recipe as ConstRecipe>::BundledOutputs;
-            fn poll(&mut self, state: &mut GameState) -> Poll<Self::Output> {
-                let machine = state.resources.machine_store.get_slot(self.0);
-                match machine.get_outputs(&state.tick) {
-                    Some(x) => {
-                        // Remove ourselves from the queue.
-                        machine.queue.retain(|h| *h != self.1);
-                        Poll::Ready(x)
-                    }
-                    None => {
-                        // Declare that we're waiting on whoever's before.
-                        let ret = if let Some(&last) = machine.queue.front()
-                            && last != self.1
-                        {
-                            // Poll::WaitingFor(last)
-                            Poll::Pending
-                        } else {
-                            Poll::Pending
-                        };
-                        // Add ourselves to the queue.
-                        if !machine.queue.contains(&self.1) {
-                            machine.queue.push_back(self.1);
-                        }
-                        // TODO: Doesn't particularly make sense to wait on a specific slot. Could
-                        // be that for each resource producer we have a queue. Each tick we poll
-                        // all the producers, move their output to the resource stores, and wake
-                        // each waiter until one returns NeedsMoreResource.
-                        // The one thing we promise is that a waiter can be enqueued only if it
-                        // provided the right inputs.
-                        // This means we know exactly the load on each producer, and can scale
-                        // appropriately.
-                        // Ideal is having n waitees for n producers. What's a load criterion for
-                        // making more producers?
-                        // Maybe we want the derivative: if the load is increasing over time we
-                        // should try to stabilize it. Beware loops: copper wire is needed to scale
-                        // up copper wire production. Should probably not be building several new
-                        // assemblers of a given type at a given moment.
-                        // We do need to load balace the inputs? Unless work stealing: each tick if
-                        // a producer would not have enough inputs for the next output it steals
-                        // one from the common pool. Important to use per-type input pools I think,
-                        // to avoid the topology getting messed up. Annoying to do generically
-                        // compared to round-robin assignment.
-                        //
-                        // In the grand scheme of things, I should distribute output to the waiters
-                        // who'll be able to make progress. The good thing is that we're getting
-                        // closer to defunctionalization: can have an enum of all the possible
-                        // waiters and possibly compute clever things. Ideally we'd compute the
-                        // full dep graph from the start. Question 1 is ordering of who gets what
-                        // first, question 2 is that scaling up changes the graph.
-                        //
-                        // Depending on load I can choose at each tick what to handcraft too! fun,
-                        // though loses time because each tick counts with the granularity I use.
-                        // What local decisions can I even make...
-                        //
-                        // For a given resource type we can switch producers: while there is no
-                        // assembler we handcraft, then switch to assembler. Seems to be able to
-                        // cover territories too.
-                        ret
-                    }
-                }
-            }
-        }
-        match self
-            .resources
-            .machine_store
-            .get_slot(slot)
-            .get_outputs(&self.tick)
-        {
-            Some(x) => self.nowait(x),
-            None => self.queue.enqueue_waiter_with(|id| W(slot, id)),
-        }
     }
 
     /// Waits for the selected producer to produce a single output bundle.

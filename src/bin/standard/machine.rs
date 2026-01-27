@@ -1,18 +1,14 @@
 use std::{
     any::{Any, type_name},
-    cell::RefCell,
     collections::VecDeque,
     marker::PhantomData,
     mem,
-    rc::Rc,
-    sync::Arc,
 };
 
 use rustorio::{
     Bundle, Recipe, ResourceType, Technology, Tick,
     buildings::{Assembler, Furnace, Lab},
     recipes::{AssemblerRecipe, FurnaceRecipe},
-    resources::IronOre,
     territory::{Miner, Territory},
 };
 use rustorio_engine::research::TechRecipe;
@@ -20,21 +16,22 @@ use rustorio_engine::research::TechRecipe;
 use crate::{
     GameState, Resources,
     crafting::{ConstRecipe, Makeable},
-    scheduler::{WaiterQueue, WakeHandle, WakeHandleId},
+    scheduler::{WaiterQueue, WakeHandle},
 };
 
-pub trait Machine {
+pub trait Machine: Any {
     type Recipe: ConstRecipe;
     fn inputs(&mut self, tick: &Tick) -> &mut <Self::Recipe as Recipe>::Inputs;
     fn outputs(&mut self, tick: &Tick) -> &mut <Self::Recipe as Recipe>::Outputs;
-    fn add_bundled_inputs(
-        &mut self,
-        tick: &Tick,
-        inputs: <Self::Recipe as ConstRecipe>::BundledInputs,
-    ) {
+
+    /// The number of input bundles currently in the machine.
+    fn input_load(&mut self, tick: &Tick) -> u32 {
+        Self::Recipe::input_load(self.inputs(tick))
+    }
+    fn add_inputs(&mut self, tick: &Tick, inputs: <Self::Recipe as ConstRecipe>::BundledInputs) {
         Self::Recipe::add_inputs(self.inputs(tick), inputs);
     }
-    fn get_bundled_outputs(
+    fn get_outputs(
         &mut self,
         tick: &Tick,
     ) -> Option<<Self::Recipe as ConstRecipe>::BundledOutputs> {
@@ -42,7 +39,7 @@ pub trait Machine {
     }
 }
 
-impl<R: FurnaceRecipe + Recipe + ConstRecipe> Machine for Furnace<R> {
+impl<R: FurnaceRecipe + ConstRecipe + Any> Machine for Furnace<R> {
     type Recipe = R;
     fn inputs(&mut self, tick: &Tick) -> &mut <R as Recipe>::Inputs {
         self.inputs(tick)
@@ -51,7 +48,7 @@ impl<R: FurnaceRecipe + Recipe + ConstRecipe> Machine for Furnace<R> {
         self.outputs(tick)
     }
 }
-impl<R: AssemblerRecipe + Recipe + ConstRecipe> Machine for Assembler<R> {
+impl<R: AssemblerRecipe + ConstRecipe + Any> Machine for Assembler<R> {
     type Recipe = R;
     fn inputs(&mut self, tick: &Tick) -> &mut <R as Recipe>::Inputs {
         self.inputs(tick)
@@ -60,9 +57,9 @@ impl<R: AssemblerRecipe + Recipe + ConstRecipe> Machine for Assembler<R> {
         self.outputs(tick)
     }
 }
-impl<T: Technology> Machine for Lab<T>
+impl<T: Technology + Any> Machine for Lab<T>
 where
-    TechRecipe<T>: Recipe + ConstRecipe,
+    TechRecipe<T>: ConstRecipe,
 {
     type Recipe = TechRecipe<T>;
     fn inputs(&mut self, tick: &Tick) -> &mut <TechRecipe<T> as Recipe>::Inputs {
@@ -110,35 +107,9 @@ pub enum MachineStorage<M> {
     /// The machine is being constructed; just wait for it to be ready.
     InConstruction,
     /// The machine is there.
-    Present(Vec<MachineWithQueue<M>>),
+    Present(Vec<M>),
     /// We removed that machine; error when trying to craft.
     Removed,
-}
-
-pub struct MachineWithQueue<M> {
-    pub machine: M,
-    /// Queue of items waiting for this machine to produce an output. Only the first item in the
-    /// queue polls the machine; the rest are each waiting on the next one to save on useless
-    /// polling.
-    pub queue: VecDeque<WakeHandleId>,
-}
-
-impl<M: Machine> MachineWithQueue<M> {
-    fn new(machine: M) -> Self {
-        Self {
-            machine,
-            queue: Default::default(),
-        }
-    }
-    pub fn add_inputs(&mut self, tick: &Tick, inputs: <M::Recipe as ConstRecipe>::BundledInputs) {
-        self.machine.add_bundled_inputs(tick, inputs);
-    }
-    pub fn get_outputs(
-        &mut self,
-        tick: &Tick,
-    ) -> Option<<M::Recipe as ConstRecipe>::BundledOutputs> {
-        self.machine.get_bundled_outputs(tick)
-    }
 }
 
 impl<M: Machine> MachineStorage<M> {
@@ -159,44 +130,31 @@ impl<M: Machine> MachineStorage<M> {
         let Self::Present(vec) = self else {
             unreachable!()
         };
-        vec.push(MachineWithQueue::new(m));
+        vec.push(m);
     }
-    fn iter(&self) -> impl Iterator<Item = &MachineWithQueue<M>> {
+    fn iter_mut(&mut self) -> impl Iterator<Item = &mut M> {
         match self {
             Self::Present(vec) => Some(vec),
             _ => None,
         }
         .into_iter()
         .flatten()
-    }
-    #[expect(unused)]
-    fn iter_mut(&mut self) -> impl Iterator<Item = &mut MachineWithQueue<M>> {
-        match self {
-            Self::Present(vec) => Some(vec),
-            _ => None,
-        }
-        .into_iter()
-        .flatten()
-    }
-    /// Compute the total number of clients waiting for output.
-    pub fn total_load(&self) -> usize {
-        self.iter().map(|m| m.queue.len()).sum()
     }
 
-    pub fn request(&mut self, _tick: &Tick) -> Option<MachineSlot<M>> {
+    pub fn request(&mut self, tick: &Tick) -> Option<MachineSlot<M>> {
         match self {
             Self::NoMachine | Self::InConstruction => None,
             // Find the least loaded machine
             Self::Present(vec) => vec
                 .iter_mut()
-                .map(|m| m.queue.len())
+                .map(|m| m.input_load(tick))
                 .enumerate()
                 .min_by_key(|(_, queue_len)| *queue_len)
                 .map(|(id, _)| MachineSlot(id, PhantomData)),
             Self::Removed => panic!("trying to craft with a removed {}", type_name::<M>()),
         }
     }
-    pub fn get(&mut self, id: MachineSlot<M>) -> &mut MachineWithQueue<M> {
+    pub fn get(&mut self, id: MachineSlot<M>) -> &mut M {
         match self {
             Self::Present(vec) => &mut vec[id.0],
             _ => panic!(),
@@ -205,12 +163,7 @@ impl<M: Machine> MachineStorage<M> {
     pub fn take_map<N: Machine>(&mut self, f: impl Fn(M) -> N) -> MachineStorage<N> {
         match mem::replace(self, Self::Removed) {
             Self::NoMachine | Self::InConstruction => MachineStorage::NoMachine,
-            Self::Present(vec) => MachineStorage::Present(
-                vec.into_iter()
-                    .map(|m| f(m.machine))
-                    .map(MachineWithQueue::new)
-                    .collect(),
-            ),
+            Self::Present(vec) => MachineStorage::Present(vec.into_iter().map(|m| f(m)).collect()),
             Self::Removed => MachineStorage::Removed,
         }
     }
@@ -226,6 +179,21 @@ impl<Ore: ResourceType + Any> Producer for Territory<Ore> {
     type Output = Bundle<Ore, 1>;
     fn poll(&mut self, tick: &Tick) -> Option<Self::Output> {
         self.resources(tick).bundle().ok()
+    }
+}
+
+impl<M> Producer for MachineStorage<M>
+where
+    M: Machine,
+{
+    type Output = <M::Recipe as ConstRecipe>::BundledOutputs;
+    fn poll(&mut self, tick: &Tick) -> Option<Self::Output> {
+        for m in self.iter_mut() {
+            if let Some(o) = m.get_outputs(tick) {
+                return Some(o);
+            }
+        }
+        None
     }
 }
 
@@ -246,6 +214,20 @@ impl<Ore: ResourceType + Any> HandProducer for Territory<Ore> {
         self.resources(tick).add(out);
     }
 }
+// impl<M: Machine> HandProducer for MachineStorage<M> {
+//     fn can_craft_automatically(&self) -> bool {
+//         self.is_present()
+//     }
+//     fn craft_by_hand(&mut self, tick: &mut Tick) {
+//         // TODO: problem is getting inputs and storing outputs
+//         todo!()
+//         // let out = self.hand_mine::<1>(tick);
+//         // self.resources(tick).add(out);
+
+//         //     let out = M::Recipe::craft(tick, inputs);
+//         //     self.resources.resource_store.get().add(out);
+//     }
+// }
 
 /// A producer along with a queue of items waiting on it.
 pub struct ProducerWithQueue<P: Producer> {
@@ -311,14 +293,19 @@ impl GameState {
     }
 
     pub fn add_machine<M: Machine + Makeable>(&mut self) -> WakeHandle<()> {
-        let machine_store = self.resources.machine_store.for_type::<M>();
+        let machine_store = &mut self.resources.machine_store.for_type::<M>().producer;
         if machine_store.needs_construction() {
             // Avoid double-creating the first machine.
             *machine_store = MachineStorage::InConstruction;
         }
         let machine = self.make();
         self.map(machine, move |state, machine: M| {
-            state.resources.machine_store.for_type().add(machine);
+            state
+                .resources
+                .machine_store
+                .for_type()
+                .producer
+                .add(machine);
         })
     }
     pub fn add_assembler<R>(&mut self) -> WakeHandle<()>

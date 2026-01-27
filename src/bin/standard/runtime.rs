@@ -1,7 +1,7 @@
 use std::{any::Any, collections::VecDeque, ops::Deref};
 
 use itertools::Itertools;
-use rustorio::{Bundle, Tick};
+use rustorio::Tick;
 
 use crate::{
     Resources, StartingResources,
@@ -69,8 +69,10 @@ impl GameState {
         let iron_territory = self.resources.iron_territory.as_mut().unwrap();
         let copper_territory = self.resources.copper_territory.as_mut().unwrap();
         if iron_territory.craft_by_hand_if_needed(self.tick.as_mut(RestrictMutToken(()))) {
+            println!("handcrafting iron ore");
             // The tick has advanced
         } else if copper_territory.craft_by_hand_if_needed(self.tick.as_mut(RestrictMutToken(()))) {
+            println!("handcrafting copper ore");
             // The tick has advanced
         } else if let Some(f) = self.mut_tick_queue.pop_front() {
             f(self, mut_token)
@@ -92,9 +94,8 @@ impl GameState {
         // are ready so this isn't backpressure, it's a bottleneck.
         let r = &mut self.resources;
         let loads = r
-            .machine_store
-            .iter()
-            .map(|store| store.report_load())
+            .producers()
+            .map(|p| (p.name(), p.load()))
             .sorted()
             .map(|(name, load)| format!(" - {name}: {load}\n"))
             .format("");

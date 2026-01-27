@@ -57,47 +57,60 @@ impl ResourceStore {
 #[derive(Default)]
 pub struct MachineStore {
     /// Maps the type id of `M` to a `Box<MachineStorage<M>>`.
-    map: HashMap<TypeId, Box<dyn StoredMachines>>,
+    map: HashMap<TypeId, Box<dyn ErasedProducer>>,
 }
 impl MachineStore {
-    pub fn for_type<M: Machine + Any>(&mut self) -> &mut MachineStorage<M> {
-        let storage: &mut (dyn StoredMachines + 'static) = self
+    pub fn for_type<M: Machine>(&mut self) -> &mut ProducerWithQueue<MachineStorage<M>> {
+        let storage: &mut (dyn ErasedProducer + 'static) = self
             .map
             .entry(TypeId::of::<M>())
-            .or_insert_with(|| Box::new(MachineStorage::<M>::default()))
+            .or_insert_with(|| Box::new(ProducerWithQueue::new(MachineStorage::<M>::default())))
             .as_mut();
         let storage: &mut (dyn Any + 'static) = storage;
         storage.downcast_mut().unwrap()
     }
-    pub fn get_slot<M: Machine + Any>(&mut self, id: MachineSlot<M>) -> &mut MachineWithQueue<M> {
-        self.for_type::<M>().get(id)
-    }
-    pub fn iter(&mut self) -> impl Iterator<Item = &mut dyn StoredMachines> {
+    pub fn iter(&mut self) -> impl Iterator<Item = &mut dyn ErasedProducer> {
         self.map.values_mut().map(|s| s.as_mut())
     }
 }
 
-pub trait StoredMachines: Any {
-    fn report_load(&mut self) -> (&str, usize);
+pub trait ErasedProducer: Any {
+    fn update(&mut self, tick: &Tick, waiters: &mut WaiterQueue);
+    fn load(&self) -> usize;
+    fn name(&self) -> &str;
 }
-impl<M: Machine + Any> StoredMachines for MachineStorage<M> {
-    fn report_load(&mut self) -> (&str, usize) {
-        let load = MachineStorage::total_load(self);
-        (std::any::type_name::<M>(), load)
+impl<P: Producer> ErasedProducer for ProducerWithQueue<P> {
+    fn update(&mut self, tick: &Tick, waiters: &mut WaiterQueue) {
+        self.update(tick, waiters);
+    }
+    fn load(&self) -> usize {
+        self.queue.len()
+    }
+    fn name(&self) -> &str {
+        std::any::type_name::<P>()
+    }
+}
+
+pub trait ErasedHandProducer: Any {
+    fn craft_by_hand_if_needed(&mut self, tick: &mut Tick) -> bool;
+}
+impl<P: HandProducer> ErasedHandProducer for ProducerWithQueue<P> {
+    fn craft_by_hand_if_needed(&mut self, tick: &mut Tick) -> bool {
+        self.craft_by_hand_if_needed(tick)
     }
 }
 
 #[derive(Default)]
 pub struct Resources {
-    iron_territory: Option<ProducerWithQueue<Territory<IronOre>>>,
-    copper_territory: Option<ProducerWithQueue<Territory<CopperOre>>>,
-
     steel_technology: Option<SteelTechnology>,
     points_technology: Option<PointsTechnology>,
     steel_smelting: Option<SteelSmelting>,
     points_recipe: Option<PointRecipe>,
 
     resource_store: ResourceStore,
+
+    iron_territory: Option<ProducerWithQueue<Territory<IronOre>>>,
+    copper_territory: Option<ProducerWithQueue<Territory<CopperOre>>>,
     machine_store: MachineStore,
 }
 
@@ -116,6 +129,19 @@ impl Resources {
         resources.iron_territory = Some(ProducerWithQueue::new(iron_territory));
         resources.copper_territory = Some(ProducerWithQueue::new(copper_territory));
         resources
+    }
+
+    pub fn producers(&mut self) -> impl Iterator<Item = &mut dyn ErasedProducer> {
+        self.iron_territory
+            .as_mut()
+            .map(|x| x as &mut dyn ErasedProducer)
+            .into_iter()
+            .chain(
+                self.copper_territory
+                    .as_mut()
+                    .map(|x| x as &mut dyn ErasedProducer),
+            )
+            .chain(self.machine_store.iter())
     }
 }
 
@@ -157,7 +183,7 @@ impl GameState {
         // self.add_miner(|r| &mut r.iron_territory);
         // self.add_furnace(IronSmelting);
 
-        let _points: WakeHandle<Bundle<Point, 30>> = self.make();
+        let _points: WakeHandle<Bundle<Point, 1>> = self.make();
         self.complete_all();
         todo!("WIP: {}", self.tick.cur())
         // let points = self.complete(points);
