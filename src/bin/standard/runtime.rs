@@ -93,7 +93,6 @@ impl GameState {
     pub fn complete<R: Any>(&mut self, h: WakeHandle<R>) -> R {
         loop {
             if let Some(ret) = self.queue.get(h) {
-                println!("{}", self.tick());
                 return ret;
             }
             self.tick_fwd();
@@ -102,7 +101,7 @@ impl GameState {
     pub fn complete_all(&mut self) {
         loop {
             if self.queue.is_all_done() {
-                println!("{}", self.tick());
+                println!("Completed all in {} ticks", self.tick().cur());
                 return;
             }
             self.tick_fwd();

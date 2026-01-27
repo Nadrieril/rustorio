@@ -15,7 +15,7 @@ use rustorio::{
 use rustorio_engine::research::TechRecipe;
 
 use crate::{
-    GameState, Resources,
+    GameState,
     crafting::{ConstRecipe, Makeable},
     scheduler::{WaiterQueue, WakeHandle},
 };
@@ -107,6 +107,13 @@ impl<M: Machine> MachineStorage<M> {
     pub fn is_present(&self) -> bool {
         matches!(self, Self::Present(vec) if !vec.is_empty())
     }
+    pub fn count(&self) -> u32 {
+        match self {
+            MachineStorage::NoMachine { .. } | MachineStorage::Removed => 0,
+            MachineStorage::Present(machines) => machines.len() as u32,
+        }
+    }
+
     pub fn add(&mut self, tick: &Tick, mut m: M) {
         println!("adding a {}", std::any::type_name::<M>());
         match self {
@@ -175,16 +182,44 @@ impl<M: Machine> Default for MachineStorage<M> {
 }
 
 /// An entity that produces outputs.
-pub trait Producer: Any {
+pub trait Producer: Any + Sized {
     type Output: Any;
+    fn name() -> &'static str;
+
+    fn get_ref(resources: &mut Resources) -> &mut ProducerWithQueue<Self>;
+
+    /// Count the number of producing entities (miners, assemblers, ..) available.
+    fn available_parallelism(&self) -> u32;
+
+    /// Update the producer and yield an output if one is ready.
     fn poll(&mut self, tick: &Tick) -> Option<Self::Output>;
+
+    // /// Schedule the addition of a new producing entity of this type. This is called when the load
+    // /// becomes too high compared to the available parallelism.
+    // fn scale_up(&mut self);
 }
 
 impl<Ore: ResourceType + Any> Producer for Territory<Ore> {
     type Output = (Bundle<Ore, 1>,);
+    fn name() -> &'static str {
+        std::any::type_name::<Ore>()
+    }
+
+    fn get_ref(resources: &mut Resources) -> &mut ProducerWithQueue<Self> {
+        resources.producers.territory::<Ore>()
+    }
+
+    fn available_parallelism(&self) -> u32 {
+        self.num_miners()
+    }
+
     fn poll(&mut self, tick: &Tick) -> Option<Self::Output> {
         self.resources(tick).bundle().ok().map(|x| (x,))
     }
+
+    // fn scale_up(&mut self) {
+    //     // TODO
+    // }
 }
 
 impl<M> Producer for MachineStorage<M>
@@ -192,9 +227,25 @@ where
     M: Machine,
 {
     type Output = <M::Recipe as ConstRecipe>::BundledOutputs;
+    fn name() -> &'static str {
+        std::any::type_name::<M::Recipe>()
+    }
+
+    fn get_ref(resources: &mut Resources) -> &mut ProducerWithQueue<Self> {
+        resources.producers.machine::<M>()
+    }
+
+    fn available_parallelism(&self) -> u32 {
+        self.count()
+    }
+
     fn poll(&mut self, tick: &Tick) -> Option<Self::Output> {
         self.poll(tick)
     }
+
+    // fn scale_up(&mut self, state: &mut GameState) {
+    //     // TODO
+    // }
 }
 
 /// Token indicating that an operation caused the tick to advance.
@@ -288,15 +339,15 @@ impl<P: Producer> ProducerWithQueue<P> {
 }
 
 impl GameState {
-    pub fn add_miner<R: ResourceType + Any>(
-        &mut self,
-        f: fn(&mut Resources) -> Option<&mut Territory<R>>,
-    ) -> WakeHandle<()> {
+    pub fn add_miner<R: ResourceType + Any>(&mut self) -> WakeHandle<()> {
         let inputs = self.make();
         self.map(inputs, move |state, (iron, copper)| {
             let miner = Miner::build(iron, copper);
-            f(&mut state.resources)
-                .unwrap()
+            state
+                .resources
+                .producers
+                .territory::<R>()
+                .producer
                 .add_miner(&state.tick, miner)
                 .unwrap();
         })
@@ -307,8 +358,8 @@ impl GameState {
         self.map(machine, move |state, machine: M| {
             state
                 .resources
-                .machine_store
-                .for_type()
+                .producers
+                .machine()
                 .producer
                 .add(&state.tick, machine);
         })
