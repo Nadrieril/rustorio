@@ -15,7 +15,7 @@ use rustorio::{
 use rustorio_engine::research::TechRecipe;
 
 use crate::{
-    GameState, Resources,
+    GameState,
     machine::{HandCrafter, Machine, MachineStorage, Producer, ProducerWithQueue},
     scheduler::WakeHandle,
 };
@@ -350,6 +350,16 @@ impl ProducerMakeable for CopperOre {
     type Producer = Territory<Self>;
     fn start_production(_state: &mut GameState, _inputs: ()) {}
 }
+impl ProducerMakeable for RedScience {
+    type Inputs = <RedScienceRecipe as ConstRecipe>::BundledInputs;
+    type Producer = HandCrafter<RedScienceRecipe>;
+    fn start_production(state: &mut GameState, inputs: Self::Inputs) {
+        Self::Producer::get_ref(&mut state.resources)
+            .producer
+            .inputs
+            .push(inputs);
+    }
+}
 impl<R> ProducerMakeable for R
 where
     R: MachineMakeable,
@@ -365,7 +375,8 @@ where
 
 trait MachineMakeable: ResourceType + Any + Sized {
     type Machine: Machine<Recipe: ConstRecipe<BundledInputs: Makeable>>
-        + SingleOutputMachine<Output: IsBundle<Resource = Self>>;
+        + SingleOutputMachine<Output: IsBundle<Resource = Self>>
+        + Makeable;
 }
 
 impl MachineMakeable for Iron {
@@ -389,11 +400,9 @@ impl MachineMakeable for Point {
 impl<T: Technology + Any> MachineMakeable for ResearchPoint<T>
 where
     TechRecipe<T>: ConstRecipe<BundledInputs: Makeable, BundledOutputs = (Bundle<Self, 1>,)>,
+    Lab<T>: Makeable,
 {
     type Machine = Lab<T>;
-}
-impl MachineMakeable for RedScience {
-    type Machine = HandCrafter<RedScienceRecipe>;
 }
 
 trait ConstMakeable {

@@ -20,7 +20,7 @@ pub struct WakeHandleId(u32);
 
 #[derive(Debug)]
 pub struct WakeHandle<T> {
-    id: WakeHandleId,
+    pub id: WakeHandleId,
     phantom: PhantomData<T>,
 }
 
@@ -155,6 +155,17 @@ impl WaiterQueue {
             phantom: PhantomData,
         }
     }
+    /// Enqueues a fake waiter that's never done.
+    pub fn set_never_resolved_handle<T: Any>(&mut self) -> WakeHandle<T> {
+        struct W<T>(PhantomData<T>);
+        impl<T: Any> Waiter for W<T> {
+            type Output = T;
+            fn poll(&mut self, _state: &mut GameState) -> Poll<Self::Output> {
+                Poll::WaitingForResource
+            }
+        }
+        self.enqueue_waiter(W(PhantomData::<T>))
+    }
     /// Set the output of this waiter. Its waiting code will no longer be run.
     pub fn set_output<T: Any>(&mut self, h: WakeHandle<T>, x: T) {
         let w = self.waiters.get_mut(&h.id).unwrap();
@@ -221,10 +232,20 @@ impl GameState {
     pub fn nowait<T: Any>(&mut self, x: T) -> WakeHandle<T> {
         self.queue.set_already_resolved_handle(x)
     }
+    pub fn never<T: Any>(&mut self) -> WakeHandle<T> {
+        self.queue.set_never_resolved_handle()
+    }
 
     pub fn check_waiters(&mut self) {
+        let mut scale_ups: Vec<fn(&mut GameState)> = vec![];
         for m in self.resources.producers() {
             m.update(&self.tick, &mut self.queue);
+            if let Some(f) = m.scale_up_if_needed() {
+                scale_ups.push(f);
+            }
+        }
+        for f in scale_ups {
+            f(self)
         }
         self.queue.enqueue_waiters_for_update();
         while let Some(handle) = self.queue.next_waiter_to_update() {
@@ -393,28 +414,6 @@ impl GameState {
             }
         }
         self.enqueue_waiter(W(handles))
-    }
-
-    /// Waits until the function returns `Some` and yields the returned value.
-    pub fn wait_for<T: Any>(
-        &mut self,
-        f: impl Fn(&mut GameState) -> Option<T> + 'static,
-    ) -> WakeHandle<T> {
-        struct W<F>(F);
-
-        impl<F, T: Any> Waiter for W<F>
-        where
-            F: Fn(&mut GameState) -> Option<T>,
-        {
-            type Output = T;
-            fn poll(&mut self, state: &mut GameState) -> Poll<Self::Output> {
-                match (self.0)(state) {
-                    Some(x) => Poll::Ready(x),
-                    None => Poll::Pending,
-                }
-            }
-        }
-        self.enqueue_waiter(W(f))
     }
 
     /// Waits for the selected producer to produce a single output bundle.

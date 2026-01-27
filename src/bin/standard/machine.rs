@@ -1,7 +1,6 @@
 use std::{
     any::{Any, type_name},
     collections::VecDeque,
-    marker::PhantomData,
     mem,
     ops::ControlFlow,
 };
@@ -15,7 +14,7 @@ use rustorio::{
 use rustorio_engine::research::TechRecipe;
 
 use crate::{
-    GameState,
+    GameState, Resources,
     crafting::{ConstRecipe, Makeable},
     scheduler::{WaiterQueue, WakeHandle},
 };
@@ -72,20 +71,6 @@ where
     }
     fn outputs(&mut self, tick: &Tick) -> &mut <TechRecipe<T> as Recipe>::Outputs {
         self.outputs(tick)
-    }
-}
-
-/// Fake machine that represents handcrafting. We don't actually construct one of these; instead we
-/// rely on the handcrafting capabilities of `MachineStorage`.
-pub struct HandCrafter<R>(PhantomData<R>);
-
-impl<R: HandRecipe + ConstRecipe + Any> Machine for HandCrafter<R> {
-    type Recipe = R;
-    fn inputs(&mut self, _tick: &Tick) -> &mut <Self::Recipe as Recipe>::Inputs {
-        todo!()
-    }
-    fn outputs(&mut self, _tick: &Tick) -> &mut <Self::Recipe as Recipe>::Outputs {
-        todo!()
     }
 }
 
@@ -181,6 +166,21 @@ impl<M: Machine> Default for MachineStorage<M> {
     }
 }
 
+/// Producer that represents handcrafting.
+pub struct HandCrafter<R: ConstRecipe> {
+    pub inputs: Vec<<R as ConstRecipe>::BundledInputs>,
+    outputs: Vec<<R as ConstRecipe>::BundledOutputs>,
+}
+
+impl<R: ConstRecipe> Default for HandCrafter<R> {
+    fn default() -> Self {
+        Self {
+            inputs: Default::default(),
+            outputs: Default::default(),
+        }
+    }
+}
+
 /// An entity that produces outputs.
 pub trait Producer: Any + Sized {
     type Output: Any;
@@ -194,9 +194,33 @@ pub trait Producer: Any + Sized {
     /// Update the producer and yield an output if one is ready.
     fn poll(&mut self, tick: &Tick) -> Option<Self::Output>;
 
-    // /// Schedule the addition of a new producing entity of this type. This is called when the load
-    // /// becomes too high compared to the available parallelism.
-    // fn scale_up(&mut self);
+    /// Schedule the addition of a new producing entity of this type. This is called when the load
+    /// becomes too high compared to the available parallelism.
+    fn scale_up(state: &mut GameState) -> WakeHandle<()>;
+}
+
+impl<R: HandRecipe + ConstRecipe + Any> Producer for HandCrafter<R> {
+    type Output = <R as ConstRecipe>::BundledOutputs;
+
+    fn name() -> &'static str {
+        std::any::type_name::<R>()
+    }
+
+    fn get_ref(resources: &mut Resources) -> &mut ProducerWithQueue<Self> {
+        resources.producers.hand_crafter()
+    }
+
+    fn available_parallelism(&self) -> u32 {
+        0
+    }
+
+    fn poll(&mut self, _tick: &Tick) -> Option<Self::Output> {
+        self.outputs.pop()
+    }
+
+    fn scale_up(state: &mut GameState) -> WakeHandle<()> {
+        state.never()
+    }
 }
 
 impl<Ore: ResourceType + Any> Producer for Territory<Ore> {
@@ -217,14 +241,14 @@ impl<Ore: ResourceType + Any> Producer for Territory<Ore> {
         self.resources(tick).bundle().ok().map(|x| (x,))
     }
 
-    // fn scale_up(&mut self) {
-    //     // TODO
-    // }
+    fn scale_up(state: &mut GameState) -> WakeHandle<()> {
+        state.add_miner::<Ore>()
+    }
 }
 
 impl<M> Producer for MachineStorage<M>
 where
-    M: Machine,
+    M: Machine + Makeable,
 {
     type Output = <M::Recipe as ConstRecipe>::BundledOutputs;
     fn name() -> &'static str {
@@ -243,9 +267,9 @@ where
         self.poll(tick)
     }
 
-    // fn scale_up(&mut self, state: &mut GameState) {
-    //     // TODO
-    // }
+    fn scale_up(state: &mut GameState) -> WakeHandle<()> {
+        state.add_machine::<M>()
+    }
 }
 
 /// Token indicating that an operation caused the tick to advance.
@@ -259,6 +283,25 @@ pub trait HandProducer: Producer {
     fn craft_by_hand(&mut self, tick: &mut Tick) -> ControlFlow<AdvancedTick>;
 }
 
+impl<R> HandProducer for HandCrafter<R>
+where
+    R: HandRecipe + ConstRecipe,
+    R: HandRecipe<InputBundle = <R as ConstRecipe>::BundledInputs>,
+    R: HandRecipe<OutputBundle = <R as ConstRecipe>::BundledOutputs>,
+{
+    fn can_craft_automatically(&self) -> bool {
+        false
+    }
+    fn craft_by_hand(&mut self, tick: &mut Tick) -> ControlFlow<AdvancedTick> {
+        if let Some(inputs) = self.inputs.pop() {
+            let out = R::craft(tick, inputs);
+            self.outputs.push(out);
+            ControlFlow::Break(AdvancedTick)
+        } else {
+            ControlFlow::Continue(())
+        }
+    }
+}
 impl<Ore: ResourceType + Any> HandProducer for Territory<Ore> {
     fn can_craft_automatically(&self) -> bool {
         self.num_miners() > 0
@@ -271,7 +314,7 @@ impl<Ore: ResourceType + Any> HandProducer for Territory<Ore> {
 }
 impl<M> HandProducer for MachineStorage<M>
 where
-    M: Machine,
+    M: Machine + Makeable,
     M::Recipe: HandRecipe<InputBundle = <M::Recipe as ConstRecipe>::BundledInputs>,
     M::Recipe: HandRecipe<OutputBundle = <M::Recipe as ConstRecipe>::BundledOutputs>,
 {
@@ -295,6 +338,9 @@ where
 pub struct ProducerWithQueue<P: Producer> {
     pub producer: P,
     pub queue: VecDeque<WakeHandle<P::Output>>,
+    /// Whether we're in the process of adding a new producing entity (so we don't add several at
+    /// the same time).
+    pub is_scaling_up: bool,
 }
 
 impl<P: Producer> ProducerWithQueue<P> {
@@ -302,6 +348,7 @@ impl<P: Producer> ProducerWithQueue<P> {
         Self {
             producer,
             queue: Default::default(),
+            is_scaling_up: Default::default(),
         }
     }
 
@@ -321,6 +368,28 @@ impl<P: Producer> ProducerWithQueue<P> {
         {
             let h = self.queue.pop_front().unwrap();
             waiters.set_output(h, output);
+        }
+    }
+
+    /// Checks if scaling up may be needed. If so, return a function to be called on the game state
+    /// to schedule a scale up.
+    pub fn scale_up_if_needed(&mut self) -> Option<fn(&mut GameState)> {
+        if !self.is_scaling_up
+            && false
+            && self.queue.len() > self.producer.available_parallelism() as usize * 5
+        {
+            fn scale_up<P: Producer>(state: &mut GameState) {
+                if !P::get_ref(&mut state.resources).is_scaling_up {
+                    P::get_ref(&mut state.resources).is_scaling_up = true;
+                    let h = P::scale_up(state);
+                    state.map(h, |state, _| {
+                        P::get_ref(&mut state.resources).is_scaling_up = false;
+                    });
+                }
+            }
+            Some(scale_up::<P>)
+        } else {
+            None
         }
     }
 

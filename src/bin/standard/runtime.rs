@@ -83,9 +83,15 @@ impl GameState {
         let r = &mut self.resources;
         let loads = r
             .producers()
-            .map(|p| (p.name(), p.load()))
-            .sorted()
-            .map(|(name, load)| format!(" - {name}: {load}\n"))
+            .sorted_by_key(|p| p.name())
+            .map(|p| {
+                format!(
+                    " - {} (x{}): {}\n",
+                    p.name(),
+                    p.available_parallelism(),
+                    p.load()
+                )
+            })
             .format("");
         eprintln!("{}:\n{}", self.tick.as_ref(), loads)
     }
@@ -94,15 +100,6 @@ impl GameState {
         loop {
             if let Some(ret) = self.queue.get(h) {
                 return ret;
-            }
-            self.tick_fwd();
-        }
-    }
-    pub fn complete_all(&mut self) {
-        loop {
-            if self.queue.is_all_done() {
-                println!("Completed all in {} ticks", self.tick().cur());
-                return;
             }
             self.tick_fwd();
         }

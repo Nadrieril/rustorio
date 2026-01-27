@@ -7,8 +7,9 @@ use std::{
     ops::ControlFlow,
 };
 
+use crafting::{ConstRecipe, Makeable};
 use rustorio::{
-    self, Bundle, Resource, ResourceType, Tick,
+    self, Bundle, HandRecipe, Resource, ResourceType, Tick,
     buildings::Assembler,
     gamemodes::Standard,
     recipes::{
@@ -58,11 +59,12 @@ impl ResourceStore {
 /// A store of producers.
 #[derive(Default)]
 pub struct ProducerStore {
-    /// Maps the type id of `M` to a `MachineStorage<M>`, and of `O` to `Territory<O>`
+    /// Maps the type id of `M` to a `MachineStorage<M>`, of `O` to `Territory<O>`, of `R` to
+    /// `HandCrafter<R>`.
     map: HashMap<TypeId, Box<dyn ErasedProducer>>,
 }
 impl ProducerStore {
-    pub fn machine<M: Machine>(&mut self) -> &mut ProducerWithQueue<MachineStorage<M>> {
+    pub fn machine<M: Machine + Makeable>(&mut self) -> &mut ProducerWithQueue<MachineStorage<M>> {
         let storage: &mut (dyn ErasedProducer + 'static) = self
             .map
             .entry(TypeId::of::<M>())
@@ -81,25 +83,44 @@ impl ProducerStore {
         let storage: &mut (dyn Any + 'static) = storage;
         storage.downcast_mut().unwrap()
     }
+    pub fn hand_crafter<R: HandRecipe + ConstRecipe>(
+        &mut self,
+    ) -> &mut ProducerWithQueue<HandCrafter<R>> {
+        let storage: &mut (dyn ErasedProducer + 'static) = self
+            .map
+            .entry(TypeId::of::<R>())
+            .or_insert_with(|| Box::new(ProducerWithQueue::new(HandCrafter::<R>::default())))
+            .as_mut();
+        let storage: &mut (dyn Any + 'static) = storage;
+        storage.downcast_mut().unwrap()
+    }
     pub fn iter(&mut self) -> impl Iterator<Item = &mut dyn ErasedProducer> {
         self.map.values_mut().map(|s| s.as_mut())
     }
 }
 
 pub trait ErasedProducer: Any {
-    fn update(&mut self, tick: &Tick, waiters: &mut WaiterQueue);
+    fn name(&self) -> &'static str;
+    fn available_parallelism(&self) -> u32;
     fn load(&self) -> usize;
-    fn name(&self) -> &str;
+    fn update(&mut self, tick: &Tick, waiters: &mut WaiterQueue);
+    fn scale_up_if_needed(&mut self) -> Option<fn(&mut GameState)>;
 }
 impl<P: Producer> ErasedProducer for ProducerWithQueue<P> {
-    fn update(&mut self, tick: &Tick, waiters: &mut WaiterQueue) {
-        self.update(tick, waiters);
+    fn name(&self) -> &'static str {
+        P::name()
+    }
+    fn available_parallelism(&self) -> u32 {
+        self.producer.available_parallelism()
     }
     fn load(&self) -> usize {
         self.queue.len()
     }
-    fn name(&self) -> &str {
-        P::name()
+    fn update(&mut self, tick: &Tick, waiters: &mut WaiterQueue) {
+        self.update(tick, waiters);
+    }
+    fn scale_up_if_needed(&mut self) -> Option<fn(&mut GameState)> {
+        self.scale_up_if_needed()
     }
 }
 
@@ -151,7 +172,7 @@ impl Resources {
         f(self.producers.territory::<IronOre>())?;
         f(self.producers.territory::<CopperOre>())?;
         f(self.producers.machine::<Assembler<CopperWireRecipe>>())?;
-        f(self.producers.machine::<HandCrafter<RedScienceRecipe>>())?;
+        f(self.producers.hand_crafter::<RedScienceRecipe>())?;
         ControlFlow::Continue(())
     }
 }
@@ -194,8 +215,8 @@ impl GameState {
         // self.add_miner(|r| &mut r.iron_territory);
         // self.add_furnace(IronSmelting);
 
-        let _points: WakeHandle<Bundle<Point, 10>> = self.make();
-        self.complete_all();
+        let points: WakeHandle<Bundle<Point, 10>> = self.make();
+        let _ = self.complete(points);
         todo!("WIP: {}", self.tick.cur())
         // let points = self.complete(points);
         // (self.tick, points)
