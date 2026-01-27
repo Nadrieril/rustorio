@@ -89,8 +89,8 @@ impl<M: Machine + Any> StoredMachines for MachineStorage<M> {
 
 #[derive(Default)]
 pub struct Resources {
-    iron_territory: Option<Territory<IronOre>>,
-    copper_territory: Option<Territory<CopperOre>>,
+    iron_territory: Option<ProducerWithQueue<Territory<IronOre>>>,
+    copper_territory: Option<ProducerWithQueue<Territory<CopperOre>>>,
 
     steel_technology: Option<SteelTechnology>,
     points_technology: Option<PointsTechnology>,
@@ -113,8 +113,8 @@ impl Resources {
         let mut resources = Resources::default();
         resources.resource_store.get().add(iron);
         resources.steel_technology = Some(steel_technology);
-        resources.iron_territory = Some(iron_territory);
-        resources.copper_territory = Some(copper_territory);
+        resources.iron_territory = Some(ProducerWithQueue::new(iron_territory));
+        resources.copper_territory = Some(ProducerWithQueue::new(copper_territory));
         resources
     }
 }
@@ -127,8 +127,8 @@ impl GameState {
         let h = self.add_furnace::<CopperSmelting>();
         self.complete(h);
 
-        self.add_miner(|r| &mut r.iron_territory);
-        self.add_miner(|r| &mut r.copper_territory);
+        self.add_miner(|r| r.iron_territory.as_mut().map(|pq| &mut pq.producer));
+        self.add_miner(|r| r.copper_territory.as_mut().map(|pq| &mut pq.producer));
 
         self.add_furnace::<IronSmelting>();
         self.add_furnace::<IronSmelting>();

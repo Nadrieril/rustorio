@@ -9,7 +9,7 @@ use std::{
 };
 
 use rustorio::{
-    Recipe, ResourceType, Technology, Tick,
+    Bundle, Recipe, ResourceType, Technology, Tick,
     buildings::{Assembler, Furnace, Lab},
     recipes::{AssemblerRecipe, FurnaceRecipe},
     resources::IronOre,
@@ -20,7 +20,7 @@ use rustorio_engine::research::TechRecipe;
 use crate::{
     GameState, Resources,
     crafting::{ConstRecipe, Makeable},
-    scheduler::{WakeHandle, WakeHandleId},
+    scheduler::{WaiterQueue, WakeHandle, WakeHandleId},
 };
 
 pub trait Machine {
@@ -216,16 +216,62 @@ impl<M: Machine> MachineStorage<M> {
     }
 }
 
+/// An entity that produces outputs.
+pub trait Producer: Any {
+    type Output: Any;
+    fn poll(&mut self, tick: &Tick) -> Option<Self::Output>;
+}
+
+impl<Ore: ResourceType + Any> Producer for Territory<Ore> {
+    type Output = Bundle<Ore, 1>;
+    fn poll(&mut self, tick: &Tick) -> Option<Self::Output> {
+        self.resources(tick).bundle().ok()
+    }
+}
+
+/// A producer along with a queue of items waiting on it.
+pub struct ProducerWithQueue<P: Producer> {
+    pub producer: P,
+    pub queue: VecDeque<WakeHandle<P::Output>>,
+}
+
+impl<P: Producer> ProducerWithQueue<P> {
+    pub fn new(producer: P) -> Self {
+        Self {
+            producer,
+            queue: Default::default(),
+        }
+    }
+
+    pub fn enqueue(&mut self, tick: &Tick, waiters: &mut WaiterQueue, h: WakeHandle<P::Output>) {
+        if self.queue.is_empty()
+            && let Some(output) = self.producer.poll(tick)
+        {
+            waiters.set_output(h, output);
+        } else {
+            self.queue.push_back(h);
+        }
+    }
+
+    pub fn update(&mut self, tick: &Tick, waiters: &mut WaiterQueue) {
+        while !self.queue.is_empty()
+            && let Some(output) = self.producer.poll(tick)
+        {
+            let h = self.queue.pop_front().unwrap();
+            waiters.set_output(h, output);
+        }
+    }
+}
+
 impl GameState {
     pub fn add_miner<R: ResourceType + Any>(
         &mut self,
-        f: fn(&mut Resources) -> &mut Option<Territory<R>>,
+        f: fn(&mut Resources) -> Option<&mut Territory<R>>,
     ) -> WakeHandle<()> {
         let inputs = self.make();
         self.map(inputs, move |state, (iron, copper)| {
             let miner = Miner::build(iron, copper);
             f(&mut state.resources)
-                .as_mut()
                 .unwrap()
                 .add_miner(&state.tick, miner)
                 .unwrap();

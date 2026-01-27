@@ -280,19 +280,13 @@ impl BundleMakeable for IronOre {
             .iron_territory
             .as_ref()
             .unwrap()
+            .producer
             .num_miners()
             == 0
         {
-            state.hand_mine(|r| r.iron_territory.as_mut().unwrap())
+            state.hand_mine(|r| &mut r.iron_territory.as_mut().unwrap().producer)
         } else {
-            state.wait_for_resource(|state| {
-                state
-                    .resources
-                    .iron_territory
-                    .as_mut()
-                    .unwrap()
-                    .resources(&state.tick)
-            })
+            state.wait_for_producer_output(|s| s.iron_territory.as_mut().unwrap())
         }
     }
 }
@@ -303,19 +297,13 @@ impl BundleMakeable for CopperOre {
             .copper_territory
             .as_ref()
             .unwrap()
+            .producer
             .num_miners()
             == 0
         {
-            state.hand_mine(|r| r.copper_territory.as_mut().unwrap())
+            state.hand_mine(|r| &mut r.copper_territory.as_mut().unwrap().producer)
         } else {
-            state.wait_for_resource(|state| {
-                state
-                    .resources
-                    .copper_territory
-                    .as_mut()
-                    .unwrap()
-                    .resources(&state.tick)
-            })
+            state.wait_for_producer_output(|s| s.copper_territory.as_mut().unwrap())
         }
     }
 }

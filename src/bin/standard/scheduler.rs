@@ -1,18 +1,18 @@
 use std::{
     any::Any,
+    collections::VecDeque,
     marker::PhantomData,
     mem,
     ops::{ControlFlow, FromResidual, Try},
 };
 
 use indexmap::{IndexMap, map::Entry};
-use itertools::Itertools;
 use rustorio::{Bundle, Resource, ResourceType};
 
 use crate::{
-    GameState,
+    GameState, Resources,
     crafting::{ConstRecipe, Makeable},
-    machine::{Machine, MachineSlot},
+    machine::{Machine, MachineSlot, Producer, ProducerWithQueue},
 };
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
@@ -32,8 +32,14 @@ impl<T> Clone for WakeHandle<T> {
 impl<T> Copy for WakeHandle<T> {}
 
 pub enum Poll<T> {
+    /// Waiting for an unspecified reason.
     Pending,
+    /// Waiting for another waiter to complete; don't poll again until that other waiter is done.
     WaitingFor(WakeHandleId),
+    /// This waiter is waiting for a resource; it will be updated directly by the resource
+    /// producer.
+    WaitingForResource,
+    /// The waiter is done.
     Ready(T),
 }
 
@@ -43,6 +49,7 @@ impl<T> FromResidual for Poll<T> {
             Poll::Ready(x) => x,
             Poll::Pending => Poll::Pending,
             Poll::WaitingFor(h) => Poll::WaitingFor(h),
+            Poll::WaitingForResource => Poll::WaitingForResource,
         }
     }
 }
@@ -57,6 +64,7 @@ impl<T> Try for Poll<T> {
             Poll::Ready(v) => ControlFlow::Continue(v),
             Poll::Pending => ControlFlow::Break(Poll::Pending),
             Poll::WaitingFor(h) => ControlFlow::Break(Poll::WaitingFor(h)),
+            Poll::WaitingForResource => ControlFlow::Break(Poll::WaitingForResource),
         }
     }
 }
@@ -76,6 +84,7 @@ impl<W: Waiter> UntypedWaiter for Untype<W> {
         match self.0.poll(state) {
             Poll::Pending => Poll::Pending,
             Poll::WaitingFor(h) => Poll::WaitingFor(h),
+            Poll::WaitingForResource => Poll::WaitingForResource,
             Poll::Ready(val) => Poll::Ready(Box::new(val)),
         }
     }
@@ -99,6 +108,8 @@ enum WaiterState {
 pub struct WaiterQueue {
     next_handle: WakeHandleId,
     waiters: IndexMap<WakeHandleId, WaiterState>,
+    /// Waiters in need of update, e.g. because the waiter they were waiting on got completed.
+    needs_update: VecDeque<WakeHandleId>,
 }
 
 impl WaiterQueue {
@@ -144,6 +155,14 @@ impl WaiterQueue {
             phantom: PhantomData,
         }
     }
+    /// Set the output of this waiter. Its waiting code will no longer be run.
+    pub fn set_output<T: Any>(&mut self, h: WakeHandle<T>, x: T) {
+        let w = self.waiters.get_mut(&h.id).unwrap();
+        if let WaiterState::Waiting { dependent, .. } = w {
+            self.needs_update.extend(dependent.drain(..));
+        }
+        *w = WaiterState::Done(Box::new(x));
+    }
     /// Gets the value returned by the waiter if it is done. This moves the value out.
     pub fn get<T: Any>(&mut self, h: WakeHandle<T>) -> Option<T> {
         match self.waiters.entry(h.id) {
@@ -174,15 +193,20 @@ impl WaiterQueue {
         }
     }
 
-    /// Go through the waiters and find those that are ready to be checked up. The waiters should
-    /// be woken up with `WaiterState::wake` directly because with a method we'd have to separate
-    /// the GameState from the queue but the waking up may need to enqueue new things.
-    pub fn waiters_to_check(&self) -> Vec<WakeHandleId> {
-        self.waiters
-            .iter()
-            .filter(|(_, waiter)| matches!(waiter, WaiterState::Waiting { dormant: false, .. }))
-            .map(|(h, _)| *h)
-            .collect_vec()
+    /// Enqueue all the waiting waiters into the update queue. Get them one by one with
+    /// `next_waiter_to_update`. We can't poll them directly because we need full access to the
+    /// `GameState`.
+    pub fn enqueue_waiters_for_update(&mut self) {
+        self.needs_update.extend(
+            self.waiters
+                .iter()
+                .filter(|(_, waiter)| matches!(waiter, WaiterState::Waiting { dormant: false, .. }))
+                .map(|(h, _)| *h),
+        )
+    }
+    /// Get the next waiter to update from the update queue.
+    pub fn next_waiter_to_update(&mut self) -> Option<WakeHandleId> {
+        self.needs_update.pop_front()
     }
 }
 
@@ -199,13 +223,23 @@ impl GameState {
     }
 
     pub fn check_waiters(&mut self) {
-        for handle in self.queue.waiters_to_check() {
+        self.resources
+            .iron_territory
+            .as_mut()
+            .unwrap()
+            .update(&self.tick, &mut self.queue);
+        self.resources
+            .copper_territory
+            .as_mut()
+            .unwrap()
+            .update(&self.tick, &mut self.queue);
+        self.queue.enqueue_waiters_for_update();
+        while let Some(handle) = self.queue.next_waiter_to_update() {
             self.check_waiter(handle);
         }
     }
     fn check_waiter(&mut self, handle: WakeHandleId) -> Option<()> {
         let mut w = mem::take(self.queue.waiters.get_mut(&handle)?);
-        let mut check_after = vec![];
         if let WaiterState::Waiting {
             waiter,
             dormant,
@@ -214,7 +248,7 @@ impl GameState {
         {
             match waiter.poll(self) {
                 Poll::Ready(val) => {
-                    check_after.extend(dependent.drain(..));
+                    self.queue.needs_update.extend(dependent.drain(..));
                     w = WaiterState::Done(val);
                 }
                 Poll::Pending => {
@@ -228,12 +262,12 @@ impl GameState {
                         *dormant = true;
                     }
                 }
+                Poll::WaitingForResource => {
+                    *dormant = true;
+                }
             }
         }
         *self.queue.waiters.get_mut(&handle).unwrap() = w;
-        for deph in check_after {
-            self.check_waiter(deph);
-        }
         Some(())
     }
     /// Poll that waiter to get its value if it is ready.
@@ -478,6 +512,24 @@ impl GameState {
         }
     }
 
+    /// Waits for the selected producer to produce a single output bundle.
+    /// This is the main wait point of our system.
+    pub fn wait_for_producer_output<P: Producer>(
+        &mut self,
+        producer: fn(&mut Resources) -> &mut ProducerWithQueue<P>,
+    ) -> WakeHandle<P::Output> {
+        struct W<P>(PhantomData<P>);
+        impl<P: Producer> Waiter for W<P> {
+            type Output = P::Output;
+            fn poll(&mut self, _state: &mut GameState) -> Poll<Self::Output> {
+                Poll::WaitingForResource
+            }
+        }
+        let h = self.queue.enqueue_waiter(W(PhantomData::<P>));
+        producer(&mut self.resources).enqueue(&self.tick, &mut self.queue, h);
+        h
+    }
+
     pub fn collect_sum<const COUNT: u32, R: ResourceType + Any>(
         &mut self,
         handles: Vec<WakeHandle<Bundle<R, COUNT>>>,
@@ -486,11 +538,5 @@ impl GameState {
         self.map(h, |_state, bundles| {
             bundles.into_iter().map(|b| b.to_resource()).sum()
         })
-    }
-
-    /// Waits until the function returns `true`.
-    #[expect(unused)]
-    pub fn wait_until(&mut self, f: impl Fn(&mut GameState) -> bool + 'static) -> WakeHandle<()> {
-        self.wait_for(move |state| f(state).then_some(()))
     }
 }
