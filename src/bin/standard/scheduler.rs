@@ -11,6 +11,7 @@ use rustorio::{Bundle, Resource, ResourceType};
 
 use crate::{
     GameState, Resources,
+    crafting::IsBundle,
     machine::{Producer, ProducerWithQueue},
 };
 
@@ -434,9 +435,9 @@ impl GameState {
         h
     }
 
-    pub fn collect_sum<const COUNT: u32, R: ResourceType + Any>(
+    pub fn collect_sum<R: ResourceType + Any, B: IsBundle<Resource = R> + Any>(
         &mut self,
-        handles: Vec<WakeHandle<Bundle<R, COUNT>>>,
+        handles: Vec<WakeHandle<B>>,
     ) -> WakeHandle<Resource<R>> {
         let h = self.collect(handles);
         self.map(h, |_state, bundles| {

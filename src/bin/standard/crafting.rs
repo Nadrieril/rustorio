@@ -10,12 +10,13 @@ use rustorio::{
     },
     research::{PointsTechnology, RedScience, SteelTechnology},
     resources::{Copper, CopperOre, CopperWire, ElectronicCircuit, Iron, IronOre, Point, Steel},
+    territory::Territory,
 };
 use rustorio_engine::research::TechRecipe;
 
 use crate::{
-    GameState,
-    machine::{HandCrafter, Machine, ProducerWithQueue},
+    GameState, Resources,
+    machine::{HandCrafter, Machine, Producer, ProducerWithQueue},
     scheduler::WakeHandle,
 };
 
@@ -160,6 +161,20 @@ impl<R: Recipe + InputN + Any + ConstRecipeImpl<{ R::INPUT_N }>> ConstRecipe for
     }
 }
 
+trait SingleOutputMachine: Machine<Recipe: ConstRecipe<BundledOutputs = (Self::Output,)>> {
+    type Output;
+}
+impl<M: Machine<Recipe: ConstRecipe<BundledOutputs = (O,)>>, O> SingleOutputMachine for M {
+    type Output = O;
+}
+
+trait SingleOutputProducer: Producer<Output = (<Self as SingleOutputProducer>::Output,)> {
+    type Output;
+}
+impl<P: Producer<Output = (O,)>, O> SingleOutputProducer for P {
+    type Output = O;
+}
+
 pub trait Makeable: Any + Sized {
     fn make(state: &mut GameState) -> WakeHandle<Self>;
 }
@@ -270,53 +285,44 @@ impl Makeable for Lab<PointsTechnology> {
 }
 
 trait BundleMakeable: ResourceType + Any + Sized {
-    fn craft_one(state: &mut GameState) -> WakeHandle<Bundle<Self, 1>>;
-    fn craft_many<const AMOUNT: u32>(state: &mut GameState) -> WakeHandle<Bundle<Self, AMOUNT>> {
-        if let Ok(x) = state.resources.resource_store.get().bundle() {
-            state.nowait(x)
-        } else {
-            state.multiple(|state| Self::craft_one(state))
-        }
-    }
+    type Bundle: IsBundle<Resource = Self>;
+    fn craft_one(state: &mut GameState) -> WakeHandle<Self::Bundle>;
 }
 impl<const AMOUNT: u32, R: BundleMakeable> Makeable for Bundle<R, AMOUNT> {
     fn make(state: &mut GameState) -> WakeHandle<Self> {
-        R::craft_many(state)
+        if let Ok(x) = state.resources.resource_store.get().bundle() {
+            state.nowait(x)
+        } else {
+            state.multiple(|state| R::craft_one(state))
+        }
     }
 }
 
 impl BundleMakeable for IronOre {
+    type Bundle = Bundle<Self, 1>;
     fn craft_one(state: &mut GameState) -> WakeHandle<Bundle<Self, 1>> {
-        state.wait_for_producer_output(|s| s.iron_territory.as_mut().unwrap())
+        let out = state.wait_for_producer_output(|s| s.iron_territory.as_mut().unwrap());
+        state.map(out, |_, out| out.0)
     }
 }
 impl BundleMakeable for CopperOre {
+    type Bundle = Bundle<Self, 1>;
     fn craft_one(state: &mut GameState) -> WakeHandle<Bundle<Self, 1>> {
-        state.wait_for_producer_output(|s| s.copper_territory.as_mut().unwrap())
-    }
-}
-impl BundleMakeable for CopperWire {
-    fn craft_one(_state: &mut GameState) -> WakeHandle<Bundle<Self, 1>> {
-        panic!("can't craft single copper wire")
-    }
-    fn craft_many<const AMOUNT: u32>(state: &mut GameState) -> WakeHandle<Bundle<Self, AMOUNT>> {
-        state.multiple(|state| {
-            state.make_then(|state, inputs| state.craft::<Assembler<CopperWireRecipe>, _>(inputs))
-        })
+        let out = state.wait_for_producer_output(|s| s.copper_territory.as_mut().unwrap());
+        state.map(out, |_, out| out.0)
     }
 }
 
 trait MachineMakeable: ResourceType + Any + Sized {
-    type Machine: Machine<
-        Recipe: Recipe<Outputs = (Resource<Self>,)>
-                    + ConstRecipe<BundledInputs: Makeable, BundledOutputs = (Bundle<Self, 1>,)>,
-    >;
+    type Machine: Machine<Recipe: ConstRecipe<BundledInputs: Makeable>>
+        + SingleOutputMachine<Output: IsBundle<Resource = Self>>;
 }
 impl<R> BundleMakeable for R
 where
     R: MachineMakeable,
 {
-    fn craft_one(state: &mut GameState) -> WakeHandle<Bundle<Self, 1>> {
+    type Bundle = <R::Machine as SingleOutputMachine>::Output;
+    fn craft_one(state: &mut GameState) -> WakeHandle<Self::Bundle> {
         state.make_then(|state, inputs| state.craft::<R::Machine, _>(inputs))
     }
 }
@@ -329,6 +335,9 @@ impl MachineMakeable for Copper {
 }
 impl MachineMakeable for Steel {
     type Machine = Furnace<SteelSmelting>;
+}
+impl MachineMakeable for CopperWire {
+    type Machine = Assembler<CopperWireRecipe>;
 }
 impl MachineMakeable for ElectronicCircuit {
     type Machine = Assembler<ElectronicCircuitRecipe>;
@@ -370,6 +379,26 @@ impl ConstMakeable for ElectronicCircuitRecipe {
     const MAKE: Self = ElectronicCircuitRecipe;
 }
 
+pub trait IsBundle {
+    const AMOUNT: u32;
+    type Resource: ResourceType;
+    fn to_resource(self) -> Resource<Self::Resource>;
+}
+impl<const AMOUNT: u32, R: ResourceType> IsBundle for Bundle<R, AMOUNT> {
+    const AMOUNT: u32 = AMOUNT;
+    type Resource = R;
+    fn to_resource(self) -> Resource<Self::Resource> {
+        self.to_resource()
+    }
+}
+impl<const AMOUNT: u32, R: ResourceType> IsBundle for (Bundle<R, AMOUNT>,) {
+    const AMOUNT: u32 = AMOUNT;
+    type Resource = R;
+    fn to_resource(self) -> Resource<Self::Resource> {
+        self.0.to_resource()
+    }
+}
+
 impl GameState {
     pub fn make<T: Makeable>(&mut self) -> WakeHandle<T> {
         T::make(self)
@@ -385,12 +414,16 @@ impl GameState {
     }
 
     /// Given a producer of a single bundle of an item, make a producer of a larger bundle.
-    pub fn multiple<const SINGLE: u32, const COUNT: u32, R: ResourceType + Any>(
+    pub fn multiple<const COUNT: u32, R, B>(
         &mut self,
-        f: impl Fn(&mut GameState) -> WakeHandle<Bundle<R, SINGLE>>,
-    ) -> WakeHandle<Bundle<R, COUNT>> {
-        assert_eq!(COUNT.rem_euclid(SINGLE), 0);
-        let singles = (0..COUNT / SINGLE).map(|_| f(self)).collect_vec();
+        f: impl Fn(&mut GameState) -> WakeHandle<B>,
+    ) -> WakeHandle<Bundle<R, COUNT>>
+    where
+        R: ResourceType + Any,
+        B: IsBundle<Resource = R> + Any,
+    {
+        assert_eq!(COUNT.rem_euclid(B::AMOUNT), 0);
+        let singles = (0..COUNT / B::AMOUNT).map(|_| f(self)).collect_vec();
         let sum = self.collect_sum(singles);
         self.map(sum, |_, mut sum| sum.bundle().unwrap())
     }

@@ -181,9 +181,9 @@ pub trait Producer: Any {
 }
 
 impl<Ore: ResourceType + Any> Producer for Territory<Ore> {
-    type Output = Bundle<Ore, 1>;
+    type Output = (Bundle<Ore, 1>,);
     fn poll(&mut self, tick: &Tick) -> Option<Self::Output> {
-        self.resources(tick).bundle().ok()
+        self.resources(tick).bundle().ok().map(|x| (x,))
     }
 }
 
