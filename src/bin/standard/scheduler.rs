@@ -10,7 +10,7 @@ use rustorio::{Resource, ResourceType};
 
 use crate::{
     GameState,
-    crafting::IsBundle,
+    crafting::{IsBundle, Makeable},
     machine::{Priority, Producer},
 };
 
@@ -361,15 +361,17 @@ impl GameState {
     }
 
     /// Give input to the producer and wait for it to produce output.
-    pub fn feed_producer<P: Producer>(
+    pub fn feed_producer<P: Producer<Input: Makeable>>(
         &mut self,
         p: Priority,
-        inputs: P::Input,
     ) -> WakeHandle<P::Output> {
-        P::get_ref(&mut self.resources)
-            .producer
-            .add_inputs(&self.tick, inputs);
-        self.wait_for_producer_output::<P>(p)
+        let inputs = self.make(p);
+        self.then(inputs, move |state, inputs| {
+            P::get_ref(&mut state.resources)
+                .producer
+                .add_inputs(&state.tick, inputs);
+            state.wait_for_producer_output::<P>(p)
+        })
     }
 
     /// Waits for the selected producer to produce a single output bundle.

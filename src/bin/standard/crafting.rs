@@ -324,7 +324,7 @@ impl Makeable for SteelSmelting {
     fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
         // If we let scaling up happen automatically, we apparently lose ticks :(
         state.scale_up::<OnceMaker<Self>>(p);
-        state.feed_producer::<OnceMaker<Self>>(p, ())
+        state.feed_producer::<OnceMaker<Self>>(p)
     }
 }
 
@@ -341,7 +341,7 @@ impl Makeable for PointRecipe {
     fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
         // If we let scaling up happen automatically, we apparently lose ticks :(
         state.scale_up::<OnceMaker<Self>>(p);
-        state.feed_producer::<OnceMaker<Self>>(p, ())
+        state.feed_producer::<OnceMaker<Self>>(p)
     }
 }
 
@@ -359,10 +359,7 @@ where
         // We cleverly don't fetch the whole input at once. Instead, as soon as the first input
         // bundle arrives we feed it to the producer.
         state.multiple(|state| {
-            let inputs = state.make(p);
-            let out = state.then(inputs, move |state, inputs| {
-                state.feed_producer::<R::Producer>(p, inputs)
-            });
+            let out = state.feed_producer::<R::Producer>(p);
             state.map(out, |_, out| out.0)
         })
     }
