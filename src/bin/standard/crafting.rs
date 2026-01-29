@@ -243,12 +243,12 @@ trait InputMakeable: Sized + Any {
 
     fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
         let inputs = state.make(p);
-        state.then(inputs, move |state, inputs| {
-            Self::make_from_input(state, p, inputs)
+        state.map(inputs, move |state, inputs| {
+            Self::make_from_input(state, inputs)
         })
     }
 
-    fn make_from_input(state: &mut GameState, p: Priority, input: Self::Input) -> WakeHandle<Self>;
+    fn make_from_input(state: &mut GameState, input: Self::Input) -> Self;
 }
 impl<R: InputMakeable> Makeable for R {
     fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
@@ -262,12 +262,8 @@ where
 {
     type Input = (R, Bundle<Iron, 10>);
 
-    fn make_from_input(
-        state: &mut GameState,
-        _p: Priority,
-        (r, iron): Self::Input,
-    ) -> WakeHandle<Self> {
-        state.nowait(Furnace::build(&state.tick, r, iron))
+    fn make_from_input(state: &mut GameState, (r, iron): Self::Input) -> Self {
+        Furnace::build(&state.tick, r, iron)
     }
 }
 impl<R> InputMakeable for Assembler<R>
@@ -276,12 +272,8 @@ where
 {
     type Input = (R, Bundle<Iron, 6>, Bundle<CopperWire, 12>);
 
-    fn make_from_input(
-        state: &mut GameState,
-        _p: Priority,
-        (r, iron, copper_wire): Self::Input,
-    ) -> WakeHandle<Self> {
-        state.nowait(Assembler::build(&state.tick, r, copper_wire, iron))
+    fn make_from_input(state: &mut GameState, (r, iron, copper_wire): Self::Input) -> Self {
+        Assembler::build(&state.tick, r, copper_wire, iron)
     }
 }
 impl<T: Technology> InputMakeable for Lab<T>
@@ -290,14 +282,9 @@ where
 {
     type Input = (Bundle<Iron, 20>, Bundle<Copper, 15>, TechAvailable<T>);
 
-    fn make_from_input(
-        state: &mut GameState,
-        _p: Priority,
-        (iron, copper, _): Self::Input,
-    ) -> WakeHandle<Self> {
+    fn make_from_input(state: &mut GameState, (iron, copper, _): Self::Input) -> Self {
         let tech = state.resources.tech().as_ref().unwrap();
-        let lab = Lab::build(&state.tick, tech, iron, copper);
-        state.nowait(lab)
+        Lab::build(&state.tick, tech, iron, copper)
     }
 }
 
@@ -305,34 +292,22 @@ pub struct TechAvailable<T: Technology>(PhantomData<T>);
 
 impl InputMakeable for TechAvailable<SteelTechnology> {
     type Input = ();
-    fn make_from_input(
-        state: &mut GameState,
-        _p: Priority,
-        _input: Self::Input,
-    ) -> WakeHandle<Self> {
-        state.nowait(Self(PhantomData))
+    fn make_from_input(_state: &mut GameState, _input: Self::Input) -> Self {
+        Self(PhantomData)
     }
 }
 impl InputMakeable for TechAvailable<PointsTechnology> {
     // The steel smelting recipe is because it also sets up the points tech.
     type Input = SteelSmelting;
-    fn make_from_input(
-        state: &mut GameState,
-        _p: Priority,
-        _input: Self::Input,
-    ) -> WakeHandle<Self> {
-        state.nowait(Self(PhantomData))
+    fn make_from_input(_state: &mut GameState, _input: Self::Input) -> Self {
+        Self(PhantomData)
     }
 }
 
 impl InputMakeable for TheFirstTime<SteelSmelting> {
     type Input = Bundle<ResearchPoint<SteelTechnology>, 20>;
 
-    fn make_from_input(
-        state: &mut GameState,
-        _p: Priority,
-        research_points: Self::Input,
-    ) -> WakeHandle<Self> {
+    fn make_from_input(state: &mut GameState, research_points: Self::Input) -> Self {
         let steel_tech: SteelTechnology = state.resources.tech().take().unwrap();
         let (steel_smelting, points_tech) = steel_tech.research(research_points);
         let pqw = state.resources.machine::<Lab<SteelTechnology>>();
@@ -342,7 +317,7 @@ impl InputMakeable for TheFirstTime<SteelSmelting> {
             .take_map(|lab| lab.change_technology(&points_tech).unwrap());
         *state.resources.machine() = ProducerWithQueue::new(lab);
         *state.resources.tech() = Some(points_tech);
-        state.nowait(TheFirstTime(steel_smelting))
+        TheFirstTime(steel_smelting)
     }
 }
 impl Makeable for SteelSmelting {
@@ -356,14 +331,10 @@ impl Makeable for SteelSmelting {
 impl InputMakeable for TheFirstTime<PointRecipe> {
     type Input = Bundle<ResearchPoint<PointsTechnology>, 50>;
 
-    fn make_from_input(
-        state: &mut GameState,
-        _p: Priority,
-        research_points: Self::Input,
-    ) -> WakeHandle<Self> {
+    fn make_from_input(state: &mut GameState, research_points: Self::Input) -> Self {
         let points_tech: PointsTechnology = state.resources.tech().take().unwrap();
         let points_recipe = points_tech.research(research_points);
-        state.nowait(TheFirstTime(points_recipe))
+        TheFirstTime(points_recipe)
     }
 }
 impl Makeable for PointRecipe {
@@ -397,11 +368,7 @@ where
     }
 
     // We never call this because we don't want to fetch the whole input at once.
-    fn make_from_input(
-        _state: &mut GameState,
-        _p: Priority,
-        _input: Self::Input,
-    ) -> WakeHandle<Self> {
+    fn make_from_input(_state: &mut GameState, _input: Self::Input) -> Self {
         unreachable!()
     }
 }
@@ -463,8 +430,8 @@ trait ConstMakeable {
 }
 impl<T: ConstMakeable + Any> InputMakeable for T {
     type Input = ();
-    fn make_from_input(state: &mut GameState, _p: Priority, _: ()) -> WakeHandle<Self> {
-        state.nowait(Self::MAKE)
+    fn make_from_input(_state: &mut GameState, _: ()) -> Self {
+        Self::MAKE
     }
 }
 
