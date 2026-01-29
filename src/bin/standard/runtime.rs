@@ -89,7 +89,7 @@ impl GameState {
         // are ready so this isn't backpressure, it's a bottleneck.
         let r = &mut self.resources;
         let loads = r
-            .producers()
+            .iter_producers()
             .sorted_by_key(|p| p.name())
             .map(|p| {
                 format!(

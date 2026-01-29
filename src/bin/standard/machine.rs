@@ -246,7 +246,7 @@ impl<R: HandRecipe + ConstRecipe + Any> Producer for HandCrafter<R> {
         std::any::type_name::<R>()
     }
     fn get_ref(resources: &mut Resources) -> &mut ProducerWithQueue<Self> {
-        resources.producers.hand_crafter()
+        resources.hand_crafter()
     }
     fn available_parallelism(&self) -> u32 {
         1
@@ -267,7 +267,7 @@ impl<Ore: ResourceType + Any> Producer for Territory<Ore> {
         std::any::type_name::<Ore>()
     }
     fn get_ref(resources: &mut Resources) -> &mut ProducerWithQueue<Self> {
-        resources.producers.territory::<Ore>()
+        resources.territory::<Ore>()
     }
     fn available_parallelism(&self) -> u32 {
         self.num_miners()
@@ -309,7 +309,7 @@ where
         std::any::type_name::<M::Recipe>()
     }
     fn get_ref(resources: &mut Resources) -> &mut ProducerWithQueue<Self> {
-        resources.producers.machine::<M>()
+        resources.machine::<M>()
     }
     fn available_parallelism(&self) -> u32 {
         self.count()
@@ -438,7 +438,7 @@ impl<O: Clone + Any> Producer for OnceMaker<O> {
         type_name::<Self>()
     }
     fn get_ref(resources: &mut Resources) -> &mut ProducerWithQueue<Self> {
-        resources.producers.once_maker()
+        resources.once_maker()
     }
     fn available_parallelism(&self) -> u32 {
         1
@@ -538,12 +538,7 @@ impl GameState {
     pub fn add_machine<M: Machine + Makeable>(&mut self, p: Priority) -> WakeHandle<()> {
         let machine = self.make(p);
         self.map(machine, move |state, machine: M| {
-            state
-                .resources
-                .producers
-                .machine()
-                .producer
-                .add(&state.tick, machine);
+            state.resources.machine().producer.add(&state.tick, machine);
         })
     }
     pub fn add_assembler<R>(&mut self, p: Priority) -> WakeHandle<()>

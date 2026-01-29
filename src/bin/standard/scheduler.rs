@@ -195,7 +195,7 @@ impl GameState {
 
     pub fn check_waiters(&mut self) {
         let mut scale_ups = vec![];
-        for m in self.resources.producers() {
+        for m in self.resources.iter_producers() {
             m.update(&self.tick, &mut self.queue);
             if let Some(f) = m.scale_up_if_needed() {
                 scale_ups.push(f);

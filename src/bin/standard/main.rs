@@ -10,11 +10,11 @@ use std::{
 use crafting::{ConstRecipe, Makeable};
 use indexmap::IndexMap;
 use rustorio::{
-    self, Bundle, HandRecipe, Resource, ResourceType, Tick,
+    self, Bundle, HandRecipe, Resource, ResourceType, Technology, Tick,
     buildings::Assembler,
     gamemodes::Standard,
     recipes::{CopperSmelting, CopperWireRecipe, IronSmelting, RedScienceRecipe, SteelSmelting},
-    research::{PointsTechnology, SteelTechnology},
+    research::SteelTechnology,
     resources::{CopperOre, IronOre, Point},
     territory::Territory,
 };
@@ -40,66 +40,9 @@ fn main() {
 
 /// A store of various resources.
 #[derive(Default)]
-pub struct ResourceStore {
-    /// Maps the type id of `R` to a `Box<Resource<R>>`.
-    map: HashMap<TypeId, Box<dyn Any>>,
-}
-impl ResourceStore {
-    pub fn get<R: ResourceType + Any>(&mut self) -> &mut Resource<R> {
-        self.map
-            .entry(TypeId::of::<R>())
-            .or_insert_with(|| Box::new(Resource::<R>::new_empty()))
-            .downcast_mut()
-            .unwrap()
-    }
-}
-
-/// A store of producers.
-#[derive(Default)]
-pub struct ProducerStore {
-    map: IndexMap<TypeId, Box<dyn ErasedProducer>>,
-}
-impl ProducerStore {
-    fn or_insert<P: Producer>(&mut self, f: impl FnOnce() -> P) -> &mut ProducerWithQueue<P> {
-        let storage: &mut (dyn ErasedProducer + 'static) = self
-            .map
-            .entry(TypeId::of::<P>())
-            .or_insert_with(|| Box::new(ProducerWithQueue::new(f())))
-            .as_mut();
-        let storage: &mut (dyn Any + 'static) = storage;
-        storage.downcast_mut().unwrap()
-    }
-    fn insert<P: Producer>(&mut self, p: P) {
-        self.map
-            .insert(TypeId::of::<P>(), Box::new(ProducerWithQueue::new(p)));
-    }
-    fn get<P: Producer>(&mut self) -> &mut ProducerWithQueue<P> {
-        let storage: &mut (dyn ErasedProducer + 'static) =
-            self.map.get_mut(&TypeId::of::<P>()).unwrap().as_mut();
-        let storage: &mut (dyn Any + 'static) = storage;
-        storage.downcast_mut().unwrap()
-    }
-    pub fn iter(&mut self) -> impl Iterator<Item = &mut dyn ErasedProducer> {
-        self.map.values_mut().map(|s| s.as_mut())
-    }
-
-    pub fn machine<M: Machine + Makeable>(&mut self) -> &mut ProducerWithQueue<MultiMachine<M>> {
-        self.or_insert(|| MultiMachine::<M>::default())
-    }
-    pub fn add_territory<O: ResourceType + Any>(&mut self, t: Territory<O>) {
-        self.insert(t);
-    }
-    pub fn territory<O: ResourceType + Any>(&mut self) -> &mut ProducerWithQueue<Territory<O>> {
-        self.get()
-    }
-    pub fn hand_crafter<R: HandRecipe + ConstRecipe>(
-        &mut self,
-    ) -> &mut ProducerWithQueue<HandCrafter<R>> {
-        self.or_insert(|| HandCrafter::<R>::default())
-    }
-    pub fn once_maker<O: Clone + Any>(&mut self) -> &mut ProducerWithQueue<OnceMaker<O>> {
-        self.or_insert(|| OnceMaker::<O>::default())
-    }
+pub struct Resources {
+    any: HashMap<TypeId, Box<dyn Any>>,
+    producers: IndexMap<TypeId, Box<dyn ErasedProducer>>,
 }
 
 pub trait ErasedProducer: Any {
@@ -145,13 +88,64 @@ impl<P: HandProducer> ErasedHandProducer for ProducerWithQueue<P> {
     }
 }
 
-#[derive(Default)]
-pub struct Resources {
-    steel_technology: Option<SteelTechnology>,
-    points_technology: Option<PointsTechnology>,
+impl Resources {
+    fn or_insert_any<X: Any>(&mut self, f: impl FnOnce() -> X) -> &mut X {
+        let storage: &mut (dyn Any + 'static) = self
+            .any
+            .entry(TypeId::of::<X>())
+            .or_insert_with(|| Box::new(f()))
+            .as_mut();
+        storage.downcast_mut().unwrap()
+    }
+    fn or_insert_producer<P: Producer>(
+        &mut self,
+        f: impl FnOnce() -> P,
+    ) -> &mut ProducerWithQueue<P> {
+        let storage: &mut (dyn ErasedProducer + 'static) = self
+            .producers
+            .entry(TypeId::of::<P>())
+            .or_insert_with(|| Box::new(ProducerWithQueue::new(f())))
+            .as_mut();
+        let storage: &mut (dyn Any + 'static) = storage;
+        storage.downcast_mut().unwrap()
+    }
+    fn insert_producer<P: Producer>(&mut self, p: P) {
+        self.producers
+            .insert(TypeId::of::<P>(), Box::new(ProducerWithQueue::new(p)));
+    }
+    fn get_producer<P: Producer>(&mut self) -> &mut ProducerWithQueue<P> {
+        let storage: &mut (dyn ErasedProducer + 'static) =
+            self.producers.get_mut(&TypeId::of::<P>()).unwrap().as_mut();
+        let storage: &mut (dyn Any + 'static) = storage;
+        storage.downcast_mut().unwrap()
+    }
+    pub fn iter_producers(&mut self) -> impl Iterator<Item = &mut dyn ErasedProducer> {
+        self.producers.values_mut().map(|s| s.as_mut())
+    }
 
-    resource_store: ResourceStore,
-    producers: ProducerStore,
+    pub fn resource<R: ResourceType + Any>(&mut self) -> &mut Resource<R> {
+        self.or_insert_any(|| Resource::<R>::new_empty())
+    }
+    pub fn tech<T: Technology + Any>(&mut self) -> &mut Option<T> {
+        self.or_insert_any(|| None)
+    }
+    pub fn machine<M: Machine + Makeable>(&mut self) -> &mut ProducerWithQueue<MultiMachine<M>> {
+        self.or_insert_producer(|| MultiMachine::<M>::default())
+    }
+    pub fn add_territory<O: ResourceType + Any>(&mut self, t: Territory<O>) {
+        self.insert_producer(t);
+    }
+    pub fn territory<O: ResourceType + Any>(&mut self) -> &mut ProducerWithQueue<Territory<O>> {
+        self.get_producer()
+    }
+    pub fn hand_crafter<R: HandRecipe + ConstRecipe>(
+        &mut self,
+    ) -> &mut ProducerWithQueue<HandCrafter<R>> {
+        self.or_insert_producer(|| HandCrafter::<R>::default())
+    }
+    pub fn once_maker<O: Clone + Any>(&mut self) -> &mut ProducerWithQueue<OnceMaker<O>> {
+        self.or_insert_producer(|| OnceMaker::<O>::default())
+    }
 }
 
 impl Resources {
@@ -164,25 +158,21 @@ impl Resources {
         } = starting_resources;
 
         let mut resources = Resources::default();
-        resources.resource_store.get().add(iron);
-        resources.producers.add_territory(iron_territory);
-        resources.producers.add_territory(copper_territory);
-        resources.steel_technology = Some(steel_technology);
+        resources.resource().add(iron);
+        *resources.tech() = Some(steel_technology);
+        resources.add_territory(iron_territory);
+        resources.add_territory(copper_territory);
         resources
-    }
-
-    pub fn producers(&mut self) -> impl Iterator<Item = &mut dyn ErasedProducer> {
-        self.producers.iter()
     }
 
     pub fn with_hand_producers(
         &mut self,
         mut f: impl FnMut(&mut dyn ErasedHandProducer) -> ControlFlow<AdvancedTick>,
     ) -> ControlFlow<AdvancedTick> {
-        f(self.producers.territory::<IronOre>())?;
-        f(self.producers.territory::<CopperOre>())?;
-        f(self.producers.machine::<Assembler<CopperWireRecipe>>())?;
-        f(self.producers.hand_crafter::<RedScienceRecipe>())?;
+        f(self.territory::<IronOre>())?;
+        f(self.territory::<CopperOre>())?;
+        f(self.machine::<Assembler<CopperWireRecipe>>())?;
+        f(self.hand_crafter::<RedScienceRecipe>())?;
         ControlFlow::Continue(())
     }
 }

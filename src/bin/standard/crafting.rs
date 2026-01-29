@@ -1,4 +1,4 @@
-use std::any::Any;
+use std::{any::Any, marker::PhantomData};
 
 use itertools::Itertools;
 use rustorio::{
@@ -238,30 +238,19 @@ impl<const N: usize, T: Makeable> Makeable for [T; N] {
 
 impl Makeable for SteelSmelting {
     fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
-        if state
-            .resources
-            .producers
-            .once_maker::<Self>()
-            .producer
-            .start()
-        {
+        if state.resources.once_maker::<Self>().producer.start() {
             let research_points = state.make(p);
             state.map(research_points, |state, research_points| {
-                let steel_tech = state.resources.steel_technology.take().unwrap();
+                let steel_tech: SteelTechnology = state.resources.tech().take().unwrap();
                 let (steel_smelting, points_tech) = steel_tech.research(research_points);
-                let pqw = state.resources.producers.machine::<Lab<SteelTechnology>>();
+                let pqw = state.resources.machine::<Lab<SteelTechnology>>();
                 assert_eq!(pqw.queue.len(), 0);
                 let lab = pqw
                     .producer
                     .take_map(|lab| lab.change_technology(&points_tech).unwrap());
-                *state.resources.producers.machine() = ProducerWithQueue::new(lab);
-                state
-                    .resources
-                    .producers
-                    .once_maker()
-                    .producer
-                    .set(steel_smelting);
-                state.resources.points_technology = Some(points_tech);
+                *state.resources.machine() = ProducerWithQueue::new(lab);
+                state.resources.once_maker().producer.set(steel_smelting);
+                *state.resources.tech() = Some(points_tech);
             });
         }
         state.feed_producer::<OnceMaker<Self>>(p, ())
@@ -269,23 +258,12 @@ impl Makeable for SteelSmelting {
 }
 impl Makeable for PointRecipe {
     fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
-        if state
-            .resources
-            .producers
-            .once_maker::<Self>()
-            .producer
-            .start()
-        {
+        if state.resources.once_maker::<Self>().producer.start() {
             let research_points = state.make(p);
             state.map(research_points, |state, research_points| {
-                let points_tech = state.resources.points_technology.take().unwrap();
+                let points_tech: PointsTechnology = state.resources.tech().take().unwrap();
                 let points_recipe = points_tech.research(research_points);
-                state
-                    .resources
-                    .producers
-                    .once_maker()
-                    .producer
-                    .set(points_recipe);
+                state.resources.once_maker().producer.set(points_recipe);
             });
         }
         state.feed_producer::<OnceMaker<Self>>(p, ())
@@ -339,32 +317,44 @@ where
         state.nowait(Assembler::build(&state.tick, r, copper_wire, iron))
     }
 }
-impl InputMakeable for Lab<SteelTechnology> {
-    type Input = (Bundle<Iron, 20>, Bundle<Copper, 15>);
+impl<T: Technology> InputMakeable for Lab<T>
+where
+    TechAvailable<T>: Makeable,
+{
+    type Input = (Bundle<Iron, 20>, Bundle<Copper, 15>, TechAvailable<T>);
 
     fn make_from_input(
         state: &mut GameState,
         _p: Priority,
-        (iron, copper): Self::Input,
+        (iron, copper, _): Self::Input,
     ) -> WakeHandle<Self> {
-        // TODO: figure out something clever to manage technologies. Token<Tech>?
-        let tech = state.resources.steel_technology.as_ref().unwrap();
+        let tech = state.resources.tech().as_ref().unwrap();
         let lab = Lab::build(&state.tick, tech, iron, copper);
         state.nowait(lab)
     }
 }
-impl InputMakeable for Lab<PointsTechnology> {
-    type Input = (Bundle<Iron, 20>, Bundle<Copper, 15>, SteelSmelting);
 
+pub struct TechAvailable<T: Technology>(PhantomData<T>);
+
+impl InputMakeable for TechAvailable<SteelTechnology> {
+    type Input = ();
     fn make_from_input(
         state: &mut GameState,
         _p: Priority,
-        (iron, copper, _steel_smelting): Self::Input,
+        _input: Self::Input,
     ) -> WakeHandle<Self> {
-        // The steel smelting recipe is because it also sets up the points tech.
-        let tech = state.resources.points_technology.as_ref().unwrap();
-        let lab = Lab::build(&state.tick, tech, iron, copper);
-        state.nowait(lab)
+        state.nowait(Self(PhantomData))
+    }
+}
+impl InputMakeable for TechAvailable<PointsTechnology> {
+    // The steel smelting recipe is because it also sets up the points tech.
+    type Input = SteelSmelting;
+    fn make_from_input(
+        state: &mut GameState,
+        _p: Priority,
+        _input: Self::Input,
+    ) -> WakeHandle<Self> {
+        state.nowait(Self(PhantomData))
     }
 }
 
@@ -376,7 +366,7 @@ where
         (AMOUNT / <R::Producer as SingleOutputProducer>::Output::AMOUNT) as usize];
 
     fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
-        if let Ok(x) = state.resources.resource_store.get().bundle() {
+        if let Ok(x) = state.resources.resource().bundle() {
             return state.nowait(x);
         }
         // We cleverly don't fetch the whole input at once. Instead, as soon as the first input
