@@ -219,19 +219,22 @@ pub trait Producer: Any + Sized {
 
     /// Schedule the addition of a new producing entity of this type. This is called when the load
     /// becomes too high compared to the available parallelism.
-    fn scale_up(state: &mut GameState) -> WakeHandle<()> {
-        state.never()
+    fn scale_up(&self, _p: Priority) -> Box<dyn FnOnce(&mut GameState) -> WakeHandle<()>> {
+        Box::new(|state| state.never())
     }
     /// Trigger a scaling up. This ensures we don't scale up many times in parallel.
-    fn trigger_scale_up(state: &mut GameState) {
-        eprintln!("scaling up {}", type_name::<Self>());
-        if !Self::get_ref(&mut state.resources).is_scaling_up {
-            Self::get_ref(&mut state.resources).is_scaling_up = true;
-            let h = Self::scale_up(state);
-            state.map(h, |state, _| {
-                Self::get_ref(&mut state.resources).is_scaling_up = false;
-            });
-        }
+    fn trigger_scale_up(p: Priority) -> Box<dyn FnOnce(&mut GameState)> {
+        Box::new(move |state| {
+            eprintln!("scaling up {}", type_name::<Self>());
+            let this = Self::get_ref(&mut state.resources);
+            if !this.is_scaling_up {
+                this.is_scaling_up = true;
+                let h = this.producer.scale_up(p)(state);
+                state.map(h, |state, _| {
+                    Self::get_ref(&mut state.resources).is_scaling_up = false;
+                });
+            }
+        })
     }
 }
 
@@ -270,8 +273,12 @@ impl<Ore: ResourceType + Any> Producer for Territory<Ore> {
         self.resources(tick).bundle().ok().map(|x| (x,))
     }
 
-    fn scale_up(state: &mut GameState) -> WakeHandle<()> {
-        state.add_miner::<Ore>()
+    fn scale_up(&self, p: Priority) -> Box<dyn FnOnce(&mut GameState) -> WakeHandle<()>> {
+        if self.num_miners() < self.max_miners() {
+            Box::new(move |state| state.add_miner::<Ore>(p))
+        } else {
+            Box::new(|state| state.never())
+        }
     }
 }
 
@@ -307,8 +314,8 @@ where
         self.poll(tick)
     }
 
-    fn scale_up(state: &mut GameState) -> WakeHandle<()> {
-        state.add_machine::<M>()
+    fn scale_up(&self, p: Priority) -> Box<dyn FnOnce(&mut GameState) -> WakeHandle<()>> {
+        Box::new(move |state| state.add_machine::<M>(p))
     }
 }
 
@@ -472,14 +479,13 @@ impl<P: Producer> ProducerWithQueue<P> {
 
     /// Checks if scaling up may be needed. If so, return a function to be called on the game state
     /// to schedule a scale up.
-    pub fn scale_up_if_needed(&mut self) -> Option<fn(&mut GameState)> {
+    pub fn scale_up_if_needed(&mut self) -> Option<Box<dyn FnOnce(&mut GameState)>> {
         if !self.is_scaling_up
-            && self.producer.available_parallelism() == 0
-            && self.queue.len() > 0
-            && false
-        // && self.queue.len() > self.producer.available_parallelism() as usize * 3
+            && self.queue.len() > self.producer.available_parallelism() as usize * 3
         {
-            Some(P::trigger_scale_up)
+            let p = self.queue.front().unwrap().1;
+            let p = Priority(p.0 + 1);
+            Some(P::trigger_scale_up(p))
         } else {
             None
         }
@@ -501,8 +507,8 @@ impl<P: Producer> ProducerWithQueue<P> {
 }
 
 impl GameState {
-    pub fn add_miner<R: ResourceType + Any>(&mut self) -> WakeHandle<()> {
-        let inputs = self.make(Priority(10));
+    pub fn add_miner<R: ResourceType + Any>(&mut self, p: Priority) -> WakeHandle<()> {
+        let inputs = self.make(p);
         self.map(inputs, move |state, (iron, copper)| {
             let miner = Miner::build(iron, copper);
             state
@@ -515,8 +521,8 @@ impl GameState {
         })
     }
 
-    pub fn add_machine<M: Machine + Makeable>(&mut self) -> WakeHandle<()> {
-        let machine = self.make(Priority(10));
+    pub fn add_machine<M: Machine + Makeable>(&mut self, p: Priority) -> WakeHandle<()> {
+        let machine = self.make(p);
         self.map(machine, move |state, machine: M| {
             state
                 .resources
@@ -526,25 +532,25 @@ impl GameState {
                 .add(&state.tick, machine);
         })
     }
-    pub fn add_assembler<R>(&mut self) -> WakeHandle<()>
+    pub fn add_assembler<R>(&mut self, p: Priority) -> WakeHandle<()>
     where
         R: AssemblerRecipe,
         Assembler<R>: Machine + Makeable,
     {
-        self.add_machine::<Assembler<R>>()
+        self.add_machine::<Assembler<R>>(p)
     }
-    pub fn add_furnace<R>(&mut self) -> WakeHandle<()>
+    pub fn add_furnace<R>(&mut self, p: Priority) -> WakeHandle<()>
     where
         R: FurnaceRecipe,
         Furnace<R>: Machine + Makeable,
     {
-        self.add_machine::<Furnace<R>>()
+        self.add_machine::<Furnace<R>>(p)
     }
-    pub fn add_lab<T>(&mut self) -> WakeHandle<()>
+    pub fn add_lab<T>(&mut self, p: Priority) -> WakeHandle<()>
     where
         T: Technology,
         Lab<T>: Machine + Makeable,
     {
-        self.add_machine::<Lab<T>>()
+        self.add_machine::<Lab<T>>(p)
     }
 }

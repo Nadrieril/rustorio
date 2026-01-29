@@ -8,6 +8,7 @@ use std::{
 };
 
 use crafting::{ConstRecipe, Makeable};
+use indexmap::IndexMap;
 use rustorio::{
     self, Bundle, HandRecipe, Resource, ResourceType, Tick,
     buildings::Assembler,
@@ -59,7 +60,7 @@ impl ResourceStore {
 /// A store of producers.
 #[derive(Default)]
 pub struct ProducerStore {
-    map: HashMap<TypeId, Box<dyn ErasedProducer>>,
+    map: IndexMap<TypeId, Box<dyn ErasedProducer>>,
 }
 impl ProducerStore {
     fn or_insert<P: Producer>(&mut self, f: impl FnOnce() -> P) -> &mut ProducerWithQueue<P> {
@@ -110,7 +111,7 @@ pub trait ErasedProducer: Any {
     fn load(&self) -> usize;
     fn report_load(&mut self, tick: &Tick) -> String;
     fn update(&mut self, tick: &Tick, waiters: &mut WaiterQueue);
-    fn scale_up_if_needed(&mut self) -> Option<fn(&mut GameState)>;
+    fn scale_up_if_needed(&mut self) -> Option<Box<dyn FnOnce(&mut GameState)>>;
 }
 impl<P: Producer> ErasedProducer for ProducerWithQueue<P> {
     fn name(&self) -> &'static str {
@@ -133,7 +134,7 @@ impl<P: Producer> ErasedProducer for ProducerWithQueue<P> {
     fn update(&mut self, tick: &Tick, waiters: &mut WaiterQueue) {
         self.update(tick, waiters);
     }
-    fn scale_up_if_needed(&mut self) -> Option<fn(&mut GameState)> {
+    fn scale_up_if_needed(&mut self) -> Option<Box<dyn FnOnce(&mut GameState)>> {
         self.scale_up_if_needed()
     }
 }
@@ -191,40 +192,41 @@ impl Resources {
 
 impl GameState {
     fn play(mut self) -> (Tick, Bundle<Point, 200>) {
+        let p = Priority(1);
         // Start with this one otherwise we're stuck.
         // <MachineStorage<Furnace<IronSmelting>>>::trigger_scale_up(&mut self);
-        self.add_furnace::<IronSmelting>();
-        self.add_furnace::<CopperSmelting>();
+        self.add_furnace::<IronSmelting>(p);
+        self.add_furnace::<CopperSmelting>(p);
 
-        self.add_miner::<IronOre>();
-        self.add_miner::<CopperOre>();
+        self.add_miner::<IronOre>(p);
+        self.add_miner::<CopperOre>(p);
 
-        self.add_furnace::<IronSmelting>();
-        self.add_furnace::<CopperSmelting>();
+        self.add_furnace::<IronSmelting>(p);
+        self.add_furnace::<CopperSmelting>(p);
 
-        let h = self.add_assembler::<CopperWireRecipe>();
+        let h = self.add_assembler::<CopperWireRecipe>(p);
         self.complete(h);
 
-        self.add_furnace::<IronSmelting>();
-        self.add_furnace::<IronSmelting>();
-        self.add_miner::<IronOre>();
-        self.add_miner::<IronOre>();
+        self.add_furnace::<IronSmelting>(p);
+        self.add_furnace::<IronSmelting>(p);
+        self.add_miner::<IronOre>(p);
+        self.add_miner::<IronOre>(p);
 
-        self.add_furnace::<IronSmelting>();
-        // self.add_miner::<CopperOre>();
-        // self.add_miner::<CopperOre>();
-        // self.add_miner::<CopperOre>();
-        // self.add_miner::<IronOre>();
-        // self.add_furnace::<CopperSmelting>();
+        self.add_furnace::<IronSmelting>(p);
+        // self.add_miner::<CopperOre>(p);
+        // self.add_miner::<CopperOre>(p);
+        // self.add_miner::<CopperOre>(p);
+        // self.add_miner::<IronOre>(p);
+        // self.add_furnace::<CopperSmelting>(p);
 
-        self.add_assembler::<ElectronicCircuitRecipe>();
+        self.add_assembler::<ElectronicCircuitRecipe>(p);
 
-        self.add_lab::<SteelTechnology>();
+        self.add_lab::<SteelTechnology>(p);
 
-        self.add_furnace::<SteelSmelting>();
-        // self.add_furnace::<SteelSmelting>();
+        self.add_furnace::<SteelSmelting>(p);
+        // self.add_furnace::<SteelSmelting>(p);
 
-        self.add_assembler::<PointRecipe>();
+        self.add_assembler::<PointRecipe>(p);
 
         let points = self.make(Priority(0));
 

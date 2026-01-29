@@ -194,7 +194,7 @@ impl GameState {
     }
 
     pub fn check_waiters(&mut self) {
-        let mut scale_ups: Vec<fn(&mut GameState)> = vec![];
+        let mut scale_ups: Vec<Box<dyn FnOnce(&mut GameState)>> = vec![];
         for m in self.resources.producers() {
             m.update(&self.tick, &mut self.queue);
             if let Some(f) = m.scale_up_if_needed() {
