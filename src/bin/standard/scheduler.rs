@@ -244,25 +244,13 @@ impl GameState {
 
     /// Poll that waiter to get its value if it is ready.
     fn poll_waiter<T: Any>(&mut self, handle: WakeHandle<T>) -> Poll<T> {
-        let _ = self.check_waiter(handle.id);
         if let Some(v) = self.queue.get(handle) {
             Poll::Ready(v)
         } else {
             Poll::WaitingFor(handle.id)
         }
     }
-    /// Poll waiter without moving the value out.
-    #[expect(unused)]
-    fn poll_waiter_ref<T: Any>(&mut self, handle: WakeHandle<T>) -> Poll<&T> {
-        let _ = self.check_waiter(handle.id);
-        if let Some(v) = self.queue.get_ref(handle) {
-            Poll::Ready(v)
-        } else {
-            Poll::WaitingFor(handle.id)
-        }
-    }
     pub fn is_ready(&mut self, id: WakeHandleId) -> bool {
-        let _ = self.check_waiter(id);
         self.queue.is_ready(id)
     }
 
