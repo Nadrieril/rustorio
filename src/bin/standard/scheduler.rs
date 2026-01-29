@@ -1,12 +1,11 @@
 use std::{
     any::Any,
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     marker::PhantomData,
-    mem,
     ops::{ControlFlow, FromResidual, Try},
 };
 
-use indexmap::{IndexMap, map::Entry};
+use indexmap::IndexMap;
 use rustorio::{Resource, ResourceType};
 
 use crate::{GameState, crafting::IsBundle, machine::Producer};
@@ -28,8 +27,6 @@ impl<T> Clone for WakeHandle<T> {
 impl<T> Copy for WakeHandle<T> {}
 
 pub enum Poll<T> {
-    /// Waiting for an unspecified reason.
-    Pending,
     /// Waiting for another waiter to complete; don't poll again until that other waiter is done.
     WaitingFor(WakeHandleId),
     /// This waiter is waiting for a resource; it will be updated directly by the resource
@@ -43,7 +40,6 @@ impl<T> FromResidual for Poll<T> {
     fn from_residual(residual: <Self as Try>::Residual) -> Self {
         match residual {
             Poll::Ready(x) => x,
-            Poll::Pending => Poll::Pending,
             Poll::WaitingFor(h) => Poll::WaitingFor(h),
             Poll::WaitingForResource => Poll::WaitingForResource,
         }
@@ -58,7 +54,6 @@ impl<T> Try for Poll<T> {
     fn branch(self) -> ControlFlow<Self::Residual, Self::Output> {
         match self {
             Poll::Ready(v) => ControlFlow::Continue(v),
-            Poll::Pending => ControlFlow::Break(Poll::Pending),
             Poll::WaitingFor(h) => ControlFlow::Break(Poll::WaitingFor(h)),
             Poll::WaitingForResource => ControlFlow::Break(Poll::WaitingForResource),
         }
@@ -78,7 +73,6 @@ struct Untype<W>(W);
 impl<W: Waiter> UntypedWaiter for Untype<W> {
     fn poll(&mut self, state: &mut GameState) -> Poll<Box<dyn Any>> {
         match self.0.poll(state) {
-            Poll::Pending => Poll::Pending,
             Poll::WaitingFor(h) => Poll::WaitingFor(h),
             Poll::WaitingForResource => Poll::WaitingForResource,
             Poll::Ready(val) => Poll::Ready(Box::new(val)),
@@ -86,55 +80,39 @@ impl<W: Waiter> UntypedWaiter for Untype<W> {
     }
 }
 
-#[derive(Default)]
-enum WaiterState {
-    Waiting {
-        waiter: Box<dyn UntypedWaiter>,
-        /// Wake these other waiters up when done.
-        dependent: Vec<WakeHandleId>,
-        /// Waiters that are waiting on another one.
-        dormant: bool,
-    },
-    Done(Box<dyn Any>),
-    #[default]
-    BeingChecked, // Dummy state for mem::replace
+struct WaiterState {
+    waiter: Box<dyn UntypedWaiter>,
+    /// Wake these other waiters up when done.
+    dependent: Vec<WakeHandleId>,
 }
 
 #[derive(Default)]
 pub struct WaiterQueue {
     next_handle: WakeHandleId,
+    /// Waiters that should be polled.
     waiters: IndexMap<WakeHandleId, WaiterState>,
+    /// Waiters waiting on some external event.
+    dormant_waiters: IndexMap<WakeHandleId, WaiterState>,
+    /// Return values of the waiters that have completed.
+    done: HashMap<WakeHandleId, Box<dyn Any>>,
     /// Waiters in need of update, e.g. because the waiter they were waiting on got completed.
     needs_update: VecDeque<WakeHandleId>,
 }
 
 impl WaiterQueue {
-    pub fn is_all_done(&self) -> bool {
-        self.waiters
-            .iter()
-            .all(|(_, w)| matches!(w, WaiterState::Done(..)))
-    }
     fn next_handle_id(&mut self) -> WakeHandleId {
         let h = self.next_handle;
         self.next_handle = WakeHandleId(h.0 + 1);
         h
     }
     /// Enqueues a waiter and returns a handle to wait for it.
-    pub fn enqueue_waiter<W: Waiter + 'static>(&mut self, w: W) -> WakeHandle<W::Output> {
-        self.enqueue_waiter_with(|_| w)
-    }
-    /// Enqueues a waiter and returns a handle to wait for it.
-    fn enqueue_waiter_with<W: Waiter + 'static>(
-        &mut self,
-        f: impl FnOnce(WakeHandleId) -> W,
-    ) -> WakeHandle<W::Output> {
+    fn enqueue_waiter<W: Waiter + 'static>(&mut self, w: W) -> WakeHandle<W::Output> {
         let h = self.next_handle_id();
         self.waiters.insert(
             h,
-            WaiterState::Waiting {
-                waiter: Box::new(Untype(f(h))),
+            WaiterState {
+                waiter: Box::new(Untype(w)),
                 dependent: vec![],
-                dormant: false,
             },
         );
         WakeHandle {
@@ -145,7 +123,7 @@ impl WaiterQueue {
     /// Enqueues a fake waiter that's already done.
     pub fn set_already_resolved_handle<T: Any>(&mut self, x: T) -> WakeHandle<T> {
         let h = self.next_handle_id();
-        self.waiters.insert(h, WaiterState::Done(Box::new(x)));
+        self.done.insert(h, Box::new(x));
         WakeHandle {
             id: h,
             phantom: PhantomData,
@@ -164,52 +142,31 @@ impl WaiterQueue {
     }
     /// Set the output of this waiter. Its waiting code will no longer be run.
     pub fn set_output<T: Any>(&mut self, h: WakeHandle<T>, x: T) {
-        let w = self.waiters.get_mut(&h.id).unwrap();
-        if let WaiterState::Waiting { dependent, .. } = w {
-            self.needs_update.extend(dependent.drain(..));
-        }
-        *w = WaiterState::Done(Box::new(x));
+        let w = self
+            .waiters
+            .swap_remove(&h.id)
+            .or_else(|| self.dormant_waiters.swap_remove(&h.id))
+            .unwrap();
+        self.needs_update.extend(w.dependent);
+        self.done.insert(h.id, Box::new(x));
     }
     /// Gets the value returned by the waiter if it is done. This moves the value out.
     pub fn get<T: Any>(&mut self, h: WakeHandle<T>) -> Option<T> {
-        match self.waiters.entry(h.id) {
-            Entry::Occupied(entry) => match entry.get() {
-                WaiterState::Waiting { .. } => None,
-                WaiterState::Done(_) => {
-                    let WaiterState::Done(x) = entry.shift_remove() else {
-                        unreachable!()
-                    };
-                    Some(*x.downcast().unwrap())
-                }
-                WaiterState::BeingChecked => unreachable!(),
-            },
-            Entry::Vacant(_) => None,
-        }
+        Some(*self.done.remove(&h.id)?.downcast::<T>().unwrap())
     }
     /// Gets the value returned by the waiter if it is done. This does not move the value out.
     pub fn get_ref<T: Any>(&mut self, h: WakeHandle<T>) -> Option<&T> {
-        match self.waiters.get(&h.id) {
-            Some(WaiterState::Done(x)) => Some(x.downcast_ref().unwrap()),
-            _ => None,
-        }
+        Some(self.done.get(&h.id)?.downcast_ref::<T>().unwrap())
     }
     pub fn is_ready(&mut self, id: WakeHandleId) -> bool {
-        match self.waiters.get(&id) {
-            Some(WaiterState::Done(_)) => true,
-            _ => false,
-        }
+        self.done.contains_key(&id)
     }
 
     /// Enqueue all the waiting waiters into the update queue. Get them one by one with
     /// `next_waiter_to_update`. We can't poll them directly because we need full access to the
     /// `GameState`.
     pub fn enqueue_waiters_for_update(&mut self) {
-        self.needs_update.extend(
-            self.waiters
-                .iter()
-                .filter(|(_, waiter)| matches!(waiter, WaiterState::Waiting { dormant: false, .. }))
-                .map(|(h, _)| *h),
-        )
+        self.needs_update.extend(self.waiters.keys().copied())
     }
     /// Get the next waiter to update from the update queue.
     pub fn next_waiter_to_update(&mut self) -> Option<WakeHandleId> {
@@ -250,35 +207,34 @@ impl GameState {
     }
 
     fn check_waiter(&mut self, handle: WakeHandleId) -> Option<()> {
-        let mut w = mem::take(self.queue.waiters.get_mut(&handle)?);
-        if let WaiterState::Waiting {
-            waiter,
-            dormant,
-            dependent,
-        } = &mut w
-        {
-            match waiter.poll(self) {
-                Poll::Ready(val) => {
-                    self.queue.needs_update.extend(dependent.drain(..));
-                    w = WaiterState::Done(val);
-                }
-                Poll::Pending => {
-                    *dormant = false; // in case we just polled a waiter that was dormant.
-                }
-                Poll::WaitingFor(waiting_for) => {
-                    if let Some(WaiterState::Waiting { dependent: dep, .. }) =
-                        self.queue.waiters.get_mut(&waiting_for)
-                    {
-                        dep.push(handle);
-                        *dormant = true;
-                    }
-                }
-                Poll::WaitingForResource => {
-                    *dormant = true;
+        let mut w = self
+            .queue
+            .waiters
+            .swap_remove(&handle)
+            .or_else(|| self.queue.dormant_waiters.swap_remove(&handle))?;
+        match w.waiter.poll(self) {
+            Poll::Ready(val) => {
+                self.queue.needs_update.extend(w.dependent);
+                self.queue.done.insert(handle, val);
+                return Some(());
+            }
+            Poll::WaitingFor(waiting_for) => {
+                if let Some(waiting_for) = self
+                    .queue
+                    .waiters
+                    .get_mut(&waiting_for)
+                    .or_else(|| self.queue.dormant_waiters.get_mut(&waiting_for))
+                {
+                    waiting_for.dependent.push(handle);
+                    self.queue.dormant_waiters.insert(handle, w);
+                } else {
+                    self.queue.waiters.insert(handle, w);
                 }
             }
+            Poll::WaitingForResource => {
+                self.queue.dormant_waiters.insert(handle, w);
+            }
         }
-        *self.queue.waiters.get_mut(&handle).unwrap() = w;
         Some(())
     }
 

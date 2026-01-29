@@ -191,11 +191,10 @@ impl Resources {
 
 impl GameState {
     fn play(mut self) -> (Tick, Bundle<Point, 200>) {
-        let h = self.add_furnace::<IronSmelting>();
-        self.complete(h);
-
-        let h = self.add_furnace::<CopperSmelting>();
-        self.complete(h);
+        // Start with this one otherwise we're stuck.
+        // <MachineStorage<Furnace<IronSmelting>>>::trigger_scale_up(&mut self);
+        self.add_furnace::<IronSmelting>();
+        self.add_furnace::<CopperSmelting>();
 
         self.add_miner::<IronOre>();
         self.add_miner::<CopperOre>();

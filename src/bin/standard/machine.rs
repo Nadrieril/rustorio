@@ -221,6 +221,17 @@ pub trait Producer: Any + Sized {
     fn scale_up(state: &mut GameState) -> WakeHandle<()> {
         state.never()
     }
+    /// Trigger a scaling up. This ensures we don't scale up many times in parallel.
+    fn trigger_scale_up(state: &mut GameState) {
+        eprintln!("scaling up {}", type_name::<Self>());
+        if !Self::get_ref(&mut state.resources).is_scaling_up {
+            Self::get_ref(&mut state.resources).is_scaling_up = true;
+            let h = Self::scale_up(state);
+            state.map(h, |state, _| {
+                Self::get_ref(&mut state.resources).is_scaling_up = false;
+            });
+        }
+    }
 }
 
 impl<R: HandRecipe + ConstRecipe + Any> Producer for HandCrafter<R> {
@@ -449,20 +460,12 @@ impl<P: Producer> ProducerWithQueue<P> {
     /// to schedule a scale up.
     pub fn scale_up_if_needed(&mut self) -> Option<fn(&mut GameState)> {
         if !self.is_scaling_up
+            && self.producer.available_parallelism() == 0
+            && self.queue.len() > 0
             && false
-            && self.queue.len() > self.producer.available_parallelism() as usize * 3
+        // && self.queue.len() > self.producer.available_parallelism() as usize * 3
         {
-            eprintln!("scaling up {}", type_name::<P>());
-            fn scale_up<P: Producer>(state: &mut GameState) {
-                if !P::get_ref(&mut state.resources).is_scaling_up {
-                    P::get_ref(&mut state.resources).is_scaling_up = true;
-                    let h = P::scale_up(state);
-                    state.map(h, |state, _| {
-                        P::get_ref(&mut state.resources).is_scaling_up = false;
-                    });
-                }
-            }
-            Some(scale_up::<P>)
+            Some(P::trigger_scale_up)
         } else {
             None
         }
@@ -475,6 +478,7 @@ impl<P: Producer> ProducerWithQueue<P> {
         P: HandProducer,
     {
         if !self.producer.can_craft_automatically() && !self.queue.is_empty() {
+            println!("crafting by hand with {}", P::name());
             self.producer.craft_by_hand(tick)
         } else {
             ControlFlow::Continue(())

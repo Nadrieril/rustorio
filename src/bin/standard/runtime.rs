@@ -61,11 +61,13 @@ impl GameState {
     pub fn tick_fwd(&mut self) {
         let mut_token = RestrictMutToken(()); // Only place where we create one.
 
-        match self.resources.with_hand_producers(|p| {
-            p.craft_by_hand_if_needed(self.tick.as_mut(RestrictMutToken(())))
-        }) {
+        let tick_mut = self.tick.as_mut(mut_token);
+        match self
+            .resources
+            .with_hand_producers(|p| p.craft_by_hand_if_needed(tick_mut))
+        {
             ControlFlow::Break(AdvancedTick) => {}
-            ControlFlow::Continue(()) => self.tick.as_mut(mut_token).advance(),
+            ControlFlow::Continue(()) => tick_mut.advance(),
         }
 
         self.check_waiters();
@@ -73,6 +75,7 @@ impl GameState {
     }
 
     pub fn report_loads(&mut self) {
+        // const REPORT_PERIOD: u64 = 5;
         const REPORT_PERIOD: u64 = 100;
         if self.tick.cur() / REPORT_PERIOD == self.last_reported_tick / REPORT_PERIOD {
             return;
@@ -103,6 +106,9 @@ impl GameState {
                 return ret;
             }
             self.tick_fwd();
+            if self.tick.cur() > 3000 {
+                panic!("ticked too far?")
+            }
         }
     }
 }
