@@ -46,7 +46,7 @@ pub struct Resources {
 }
 
 pub trait ErasedProducer: Any {
-    fn name(&self) -> &'static str;
+    fn name(&self) -> String;
     fn available_parallelism(&self) -> u32;
     fn load(&self) -> usize;
     fn report_load(&mut self, tick: &Tick) -> String;
@@ -54,7 +54,7 @@ pub trait ErasedProducer: Any {
     fn scale_up_if_needed(&mut self) -> Option<Box<dyn FnOnce(&mut GameState) -> WakeHandle<()>>>;
 }
 impl<P: Producer> ErasedProducer for ProducerWithQueue<P> {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> String {
         P::name()
     }
     fn available_parallelism(&self) -> u32 {
@@ -182,7 +182,7 @@ impl Resources {
 
 impl GameState {
     fn play(mut self) -> (Tick, Bundle<Point, 200>) {
-        let p = Priority(1);
+        let p = Priority(4);
         // Start with this one otherwise we're stuck.
         self.scale_up::<MultiMachine<Furnace<IronSmelting>>>(p);
         // self.add_furnace::<IronSmelting>(p);

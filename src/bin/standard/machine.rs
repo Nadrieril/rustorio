@@ -1,10 +1,4 @@
-use std::{
-    any::{Any, type_name},
-    cmp::Reverse,
-    collections::VecDeque,
-    mem,
-    ops::ControlFlow,
-};
+use std::{any::Any, cmp::Reverse, collections::VecDeque, mem, ops::ControlFlow};
 
 use itertools::Itertools;
 use rustorio::{
@@ -20,6 +14,18 @@ use crate::{
     crafting::{ConstRecipe, Makeable, MultiBundle},
     scheduler::{WaiterQueue, WakeHandle},
 };
+
+pub fn type_name<T: Any>() -> String {
+    let str = std::any::type_name::<T>();
+    str.split('<')
+        .map(|str| {
+            str.split('<')
+                .map(|str| str.split("::").last().unwrap())
+                .format("<")
+        })
+        .format("<")
+        .to_string()
+}
 
 pub trait Machine: Any {
     type Recipe: ConstRecipe;
@@ -106,7 +112,7 @@ impl<M: Machine> MultiMachine<M> {
     }
 
     pub fn add(&mut self, tick: &Tick, mut m: M) {
-        println!("adding a {}", std::any::type_name::<M>());
+        println!("adding a {}", type_name::<M>());
         match self {
             MultiMachine::NoMachine { inputs, outputs } => {
                 for input in mem::take(inputs) {
@@ -203,7 +209,7 @@ impl<R: ConstRecipe> Default for HandCrafter<R> {
 pub trait Producer: Any + Sized {
     type Input: Any;
     type Output: Any;
-    fn name() -> &'static str;
+    fn name() -> String;
 
     fn get_ref(resources: &mut Resources) -> &mut ProducerWithQueue<Self>;
 
@@ -242,8 +248,8 @@ pub trait Producer: Any + Sized {
 impl<R: HandRecipe + ConstRecipe + Any> Producer for HandCrafter<R> {
     type Input = <R as ConstRecipe>::BundledInputs;
     type Output = <R as ConstRecipe>::BundledOutputs;
-    fn name() -> &'static str {
-        std::any::type_name::<R>()
+    fn name() -> String {
+        type_name::<R>()
     }
     fn get_ref(resources: &mut Resources) -> &mut ProducerWithQueue<Self> {
         resources.hand_crafter()
@@ -263,8 +269,8 @@ impl<R: HandRecipe + ConstRecipe + Any> Producer for HandCrafter<R> {
 impl<Ore: ResourceType + Any> Producer for Territory<Ore> {
     type Input = ();
     type Output = (Bundle<Ore, 1>,);
-    fn name() -> &'static str {
-        std::any::type_name::<Ore>()
+    fn name() -> String {
+        type_name::<Ore>()
     }
     fn get_ref(resources: &mut Resources) -> &mut ProducerWithQueue<Self> {
         resources.territory::<Ore>()
@@ -305,8 +311,8 @@ where
 {
     type Input = <M::Recipe as ConstRecipe>::BundledInputs;
     type Output = <M::Recipe as ConstRecipe>::BundledOutputs;
-    fn name() -> &'static str {
-        std::any::type_name::<M::Recipe>()
+    fn name() -> String {
+        type_name::<M::Recipe>()
     }
     fn get_ref(resources: &mut Resources) -> &mut ProducerWithQueue<Self> {
         resources.machine::<M>()
@@ -449,7 +455,7 @@ where
 {
     type Input = ();
     type Output = O;
-    fn name() -> &'static str {
+    fn name() -> String {
         type_name::<Self>()
     }
     fn get_ref(resources: &mut Resources) -> &mut ProducerWithQueue<Self> {
