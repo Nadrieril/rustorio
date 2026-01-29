@@ -1,5 +1,6 @@
 use std::{
     any::{Any, type_name},
+    cmp::Reverse,
     collections::VecDeque,
     mem,
     ops::ControlFlow,
@@ -454,7 +455,9 @@ impl<P: Producer> ProducerWithQueue<P> {
             waiters.set_output(h, output);
         } else {
             self.queue.push_back((h, p));
-            self.queue.make_contiguous().sort_by_key(|(_, p)| *p);
+            self.queue
+                .make_contiguous()
+                .sort_by_key(|(_, p)| Reverse(*p));
         }
     }
 

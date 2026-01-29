@@ -226,7 +226,7 @@ impl GameState {
 
         self.add_assembler::<PointRecipe>();
 
-        let points = self.make(Priority(10));
+        let points = self.make(Priority(0));
 
         eprintln!("starting!");
         let points: Bundle<Point, 100> = self.complete(points);
