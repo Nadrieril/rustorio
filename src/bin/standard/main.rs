@@ -2,7 +2,7 @@
 #![feature(generic_const_exprs, try_trait_v2, never_type)]
 #![allow(incomplete_features)]
 use std::{
-    any::{Any, TypeId, type_name_of_val},
+    any::{Any, TypeId},
     collections::HashMap,
     ops::ControlFlow,
 };
@@ -11,12 +11,9 @@ use crafting::{ConstRecipe, Makeable};
 use indexmap::IndexMap;
 use rustorio::{
     self, Bundle, HandRecipe, Resource, ResourceType, Tick,
-    buildings::{Assembler, Furnace},
+    buildings::Assembler,
     gamemodes::Standard,
-    recipes::{
-        CopperSmelting, CopperWireRecipe, ElectronicCircuitRecipe, IronSmelting, PointRecipe,
-        RedScienceRecipe, SteelSmelting,
-    },
+    recipes::{CopperSmelting, CopperWireRecipe, IronSmelting, RedScienceRecipe, SteelSmelting},
     research::{PointsTechnology, SteelTechnology},
     resources::{CopperOre, IronOre, Point},
     territory::Territory,

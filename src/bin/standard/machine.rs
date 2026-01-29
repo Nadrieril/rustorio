@@ -201,6 +201,7 @@ impl<R: ConstRecipe> Default for HandCrafter<R> {
 
 /// An entity that produces outputs.
 pub trait Producer: Any + Sized {
+    type Input: Any;
     type Output: Any;
     fn name() -> &'static str;
 
@@ -213,6 +214,8 @@ pub trait Producer: Any + Sized {
     fn report_load(&mut self, _tick: &Tick) -> Option<String> {
         None
     }
+
+    fn add_inputs(&mut self, tick: &Tick, inputs: Self::Input);
 
     /// Update the producer and yield an output if one is ready.
     fn poll(&mut self, tick: &Tick) -> Option<Self::Output>;
@@ -237,6 +240,7 @@ pub trait Producer: Any + Sized {
 }
 
 impl<R: HandRecipe + ConstRecipe + Any> Producer for HandCrafter<R> {
+    type Input = <R as ConstRecipe>::BundledInputs;
     type Output = <R as ConstRecipe>::BundledOutputs;
     fn name() -> &'static str {
         std::any::type_name::<R>()
@@ -248,25 +252,28 @@ impl<R: HandRecipe + ConstRecipe + Any> Producer for HandCrafter<R> {
         1
     }
 
+    fn add_inputs(&mut self, _tick: &Tick, inputs: Self::Input) {
+        self.inputs.push(inputs);
+    }
     fn poll(&mut self, _tick: &Tick) -> Option<Self::Output> {
         self.outputs.pop()
     }
 }
 
 impl<Ore: ResourceType + Any> Producer for Territory<Ore> {
+    type Input = ();
     type Output = (Bundle<Ore, 1>,);
     fn name() -> &'static str {
         std::any::type_name::<Ore>()
     }
-
     fn get_ref(resources: &mut Resources) -> &mut ProducerWithQueue<Self> {
         resources.producers.territory::<Ore>()
     }
-
     fn available_parallelism(&self) -> u32 {
         self.num_miners()
     }
 
+    fn add_inputs(&mut self, _tick: &Tick, _inputs: Self::Input) {}
     fn poll(&mut self, tick: &Tick) -> Option<Self::Output> {
         self.resources(tick).bundle().ok().map(|x| (x,))
     }
@@ -296,6 +303,7 @@ impl<M> Producer for MachineStorage<M>
 where
     M: Machine + Makeable,
 {
+    type Input = <M::Recipe as ConstRecipe>::BundledInputs;
     type Output = <M::Recipe as ConstRecipe>::BundledOutputs;
     fn name() -> &'static str {
         std::any::type_name::<M::Recipe>()
@@ -320,6 +328,9 @@ where
         }
     }
 
+    fn add_inputs(&mut self, tick: &Tick, inputs: Self::Input) {
+        self.add_inputs(tick, inputs);
+    }
     fn poll(&mut self, tick: &Tick) -> Option<Self::Output> {
         self.poll(tick)
     }
@@ -421,6 +432,7 @@ impl<O> Default for OnceMaker<O> {
 }
 
 impl<O: Clone + Any> Producer for OnceMaker<O> {
+    type Input = ();
     type Output = O;
     fn name() -> &'static str {
         type_name::<Self>()
@@ -432,6 +444,7 @@ impl<O: Clone + Any> Producer for OnceMaker<O> {
         1
     }
 
+    fn add_inputs(&mut self, _tick: &Tick, _inputs: Self::Input) {}
     fn poll(&mut self, _tick: &Tick) -> Option<Self::Output> {
         self.output.clone()
     }

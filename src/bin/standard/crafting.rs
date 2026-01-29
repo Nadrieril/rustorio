@@ -350,13 +350,10 @@ impl<const AMOUNT: u32, R: ProducerMakeable> Makeable for Bundle<R, AMOUNT> {
 }
 
 /// Items that can be produced by producers. This is the heart of the crafting logic.
-/// This producer first fetches the required inputs, then calls `start_production`, then waits for
-/// the producer to produce its output.
+/// This maker fetches the required inputs, gives them to the producer, then waits for the producer
+/// to produce its output.
 trait ProducerMakeable: ResourceType + Sized + Any {
-    type Inputs: Makeable;
-    type Producer: SingleOutputProducer<Output: IsBundle<Resource = Self>>;
-
-    fn start_production(state: &mut GameState, inputs: Self::Inputs);
+    type Producer: SingleOutputProducer<Input: Makeable, Output: IsBundle<Resource = Self>>;
 
     fn make_one(
         state: &mut GameState,
@@ -364,7 +361,9 @@ trait ProducerMakeable: ResourceType + Sized + Any {
     ) -> WakeHandle<<Self::Producer as SingleOutputProducer>::Output> {
         let inputs = state.make(p);
         let out = state.then(inputs, move |state, inputs| {
-            Self::start_production(state, inputs);
+            Self::Producer::get_ref(&mut state.resources)
+                .producer
+                .add_inputs(&state.tick, inputs);
             state.wait_for_producer_output::<Self::Producer>(p)
         });
         state.map(out, |_, out| out.0)
@@ -382,36 +381,16 @@ trait ProducerMakeable: ResourceType + Sized + Any {
 }
 
 impl ProducerMakeable for IronOre {
-    type Inputs = ();
     type Producer = Territory<Self>;
-    fn start_production(_state: &mut GameState, _inputs: ()) {}
 }
 impl ProducerMakeable for CopperOre {
-    type Inputs = ();
     type Producer = Territory<Self>;
-    fn start_production(_state: &mut GameState, _inputs: ()) {}
 }
 impl ProducerMakeable for RedScience {
-    type Inputs = <RedScienceRecipe as ConstRecipe>::BundledInputs;
     type Producer = HandCrafter<RedScienceRecipe>;
-    fn start_production(state: &mut GameState, inputs: Self::Inputs) {
-        Self::Producer::get_ref(&mut state.resources)
-            .producer
-            .inputs
-            .push(inputs);
-    }
 }
-impl<R> ProducerMakeable for R
-where
-    R: MachineMakeable,
-{
-    type Inputs = <<R::Machine as Machine>::Recipe as ConstRecipe>::BundledInputs;
+impl<R: MachineMakeable> ProducerMakeable for R {
     type Producer = MachineStorage<R::Machine>;
-    fn start_production(state: &mut GameState, inputs: Self::Inputs) {
-        Self::Producer::get_ref(&mut state.resources)
-            .producer
-            .add_inputs(&state.tick, inputs);
-    }
 }
 
 trait MachineMakeable: ResourceType + Any + Sized {
