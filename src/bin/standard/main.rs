@@ -83,8 +83,8 @@ impl ProducerStore {
         self.map.values_mut().map(|s| s.as_mut())
     }
 
-    pub fn machine<M: Machine + Makeable>(&mut self) -> &mut ProducerWithQueue<MachineStorage<M>> {
-        self.or_insert(|| MachineStorage::<M>::default())
+    pub fn machine<M: Machine + Makeable>(&mut self) -> &mut ProducerWithQueue<MultiMachine<M>> {
+        self.or_insert(|| MultiMachine::<M>::default())
     }
     pub fn add_territory<O: ResourceType + Any>(&mut self, t: Territory<O>) {
         self.insert(t);

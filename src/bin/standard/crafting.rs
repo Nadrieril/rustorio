@@ -17,7 +17,7 @@ use rustorio_engine::research::TechRecipe;
 use crate::{
     GameState,
     machine::{
-        HandCrafter, Machine, MachineStorage, OnceMaker, Priority, Producer, ProducerWithQueue,
+        HandCrafter, Machine, MultiMachine, OnceMaker, Priority, Producer, ProducerWithQueue,
     },
     scheduler::WakeHandle,
 };
@@ -200,14 +200,18 @@ impl<R: Recipe + InputN + Any + ConstRecipeImpl<{ R::INPUT_N }>> ConstRecipe for
     }
 }
 
-trait SingleOutputMachine: Machine<Recipe: ConstRecipe<BundledOutputs = (Self::Output,)>> {
+pub trait SingleOutputMachine:
+    Machine<Recipe: ConstRecipe<BundledOutputs = (Self::Output,)>>
+{
     type Output;
 }
 impl<M: Machine<Recipe: ConstRecipe<BundledOutputs = (O,)>>, O> SingleOutputMachine for M {
     type Output = O;
 }
 
-trait SingleOutputProducer: Producer<Output = (<Self as SingleOutputProducer>::Output,)> {
+pub trait SingleOutputProducer:
+    Producer<Output = (<Self as SingleOutputProducer>::Output,)>
+{
     type Output;
 }
 impl<P: Producer<Output = (O,)>, O> SingleOutputProducer for P {
@@ -243,6 +247,13 @@ impl<A: Makeable, B: Makeable, C: Makeable> Makeable for (A, B, C) {
         state.triple(a, b, c)
     }
 }
+impl<const N: usize, T: Makeable> Makeable for [T; N] {
+    fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
+        let handles = (0..N).map(|_| T::make(state, p)).collect_vec();
+        let h = state.collect(handles);
+        state.map(h, |_, v| v.try_into().ok().unwrap())
+    }
+}
 
 impl Makeable for SteelSmelting {
     fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
@@ -272,7 +283,7 @@ impl Makeable for SteelSmelting {
                 state.resources.points_technology = Some(points_tech);
             });
         }
-        state.wait_for_producer_output::<OnceMaker<Self>>(p)
+        state.feed_producer::<OnceMaker<Self>>(p, ())
     }
 }
 impl Makeable for PointRecipe {
@@ -296,88 +307,122 @@ impl Makeable for PointRecipe {
                     .set(points_recipe);
             });
         }
-        state.wait_for_producer_output::<OnceMaker<Self>>(p)
+        state.feed_producer::<OnceMaker<Self>>(p, ())
     }
 }
 
-impl<R> Makeable for Furnace<R>
+/// Items that can be produced from a given makeable input.
+trait InputMakeable: Sized + Any {
+    type Input: Makeable;
+
+    fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
+        let inputs = state.make(p);
+        state.then(inputs, move |state, inputs| {
+            Self::make_from_input(state, p, inputs)
+        })
+    }
+
+    fn make_from_input(state: &mut GameState, p: Priority, input: Self::Input) -> WakeHandle<Self>;
+}
+impl<R: InputMakeable> Makeable for R {
+    fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
+        <Self as InputMakeable>::make(state, p)
+    }
+}
+
+impl<R> InputMakeable for Furnace<R>
 where
     R: FurnaceRecipe + Recipe + Makeable,
 {
-    fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
-        let inputs = state.make(p);
-        state.map(inputs, |state, (r, iron)| {
-            Furnace::build(&state.tick, r, iron)
-        })
+    type Input = (R, Bundle<Iron, 10>);
+
+    fn make_from_input(
+        state: &mut GameState,
+        _p: Priority,
+        (r, iron): Self::Input,
+    ) -> WakeHandle<Self> {
+        state.nowait(Furnace::build(&state.tick, r, iron))
     }
 }
-impl<R> Makeable for Assembler<R>
+impl<R> InputMakeable for Assembler<R>
 where
     R: AssemblerRecipe + Recipe + Makeable,
 {
-    fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
-        let inputs = state.make(p);
-        state.map(inputs, |state, (r, copper_wire, iron)| {
-            Assembler::build(&state.tick, r, copper_wire, iron)
-        })
+    type Input = (R, Bundle<Iron, 6>, Bundle<CopperWire, 12>);
+
+    fn make_from_input(
+        state: &mut GameState,
+        _p: Priority,
+        (r, iron, copper_wire): Self::Input,
+    ) -> WakeHandle<Self> {
+        state.nowait(Assembler::build(&state.tick, r, copper_wire, iron))
     }
 }
-impl Makeable for Lab<SteelTechnology> {
-    fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
-        let inputs = state.make(p);
-        state.map(inputs, move |state, (iron, copper)| {
-            let tech = state.resources.steel_technology.as_ref().unwrap();
-            Lab::build(&state.tick, tech, iron, copper)
-        })
+impl InputMakeable for Lab<SteelTechnology> {
+    type Input = (Bundle<Iron, 20>, Bundle<Copper, 15>);
+
+    fn make_from_input(
+        state: &mut GameState,
+        _p: Priority,
+        (iron, copper): Self::Input,
+    ) -> WakeHandle<Self> {
+        let tech = state.resources.steel_technology.as_ref().unwrap();
+        let lab = Lab::build(&state.tick, tech, iron, copper);
+        state.nowait(lab)
     }
 }
-impl Makeable for Lab<PointsTechnology> {
-    fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
-        let inputs = state.make(p);
-        state.map(inputs, move |state, (iron, copper, steel_smelting)| {
-            // Wait for the steel smelting recipe, because it also sets up the points tech.
-            let _: SteelSmelting = steel_smelting;
-            let tech = state.resources.points_technology.as_ref().unwrap();
-            Lab::build(&state.tick, tech, iron, copper)
-        })
+impl InputMakeable for Lab<PointsTechnology> {
+    type Input = (Bundle<Iron, 20>, Bundle<Copper, 15>, SteelSmelting);
+
+    fn make_from_input(
+        state: &mut GameState,
+        _p: Priority,
+        (iron, copper, _steel_smelting): Self::Input,
+    ) -> WakeHandle<Self> {
+        // The steel smelting recipe is because it also sets up the points tech.
+        let tech = state.resources.points_technology.as_ref().unwrap();
+        let lab = Lab::build(&state.tick, tech, iron, copper);
+        state.nowait(lab)
     }
 }
 
-impl<const AMOUNT: u32, R: ProducerMakeable> Makeable for Bundle<R, AMOUNT> {
+impl<const AMOUNT: u32, R: ProducerMakeable> InputMakeable for Bundle<R, AMOUNT>
+where
+    [(); (AMOUNT / <R::Producer as SingleOutputProducer>::Output::AMOUNT) as usize]:,
+{
+    type Input = [<R::Producer as Producer>::Input;
+        (AMOUNT / <R::Producer as SingleOutputProducer>::Output::AMOUNT) as usize];
+
     fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
-        R::make_many(state, p)
+        if let Ok(x) = state.resources.resource_store.get().bundle() {
+            return state.nowait(x);
+        }
+        // We cleverly don't fetch the whole input at once. Instead, as soon as the first input
+        // bundle arrives we feed it to the producer.
+        state.multiple(|state| {
+            let inputs = state.make(p);
+            let out = state.then(inputs, move |state, inputs| {
+                state.feed_producer::<R::Producer>(p, inputs)
+            });
+            state.map(out, |_, out| out.0)
+        })
+    }
+
+    // We never call this because we don't want to fetch the whole input at once.
+    fn make_from_input(
+        _state: &mut GameState,
+        _p: Priority,
+        _input: Self::Input,
+    ) -> WakeHandle<Self> {
+        unreachable!()
     }
 }
 
 /// Items that can be produced by producers. This is the heart of the crafting logic.
 /// This maker fetches the required inputs, gives them to the producer, then waits for the producer
 /// to produce its output.
-trait ProducerMakeable: ResourceType + Sized + Any {
+pub trait ProducerMakeable: ResourceType + Sized + Any {
     type Producer: SingleOutputProducer<Input: Makeable, Output: IsBundle<Resource = Self>>;
-
-    fn make_one(
-        state: &mut GameState,
-        p: Priority,
-    ) -> WakeHandle<<Self::Producer as SingleOutputProducer>::Output> {
-        let inputs = state.make(p);
-        let out = state.then(inputs, move |state, inputs| {
-            Self::Producer::get_ref(&mut state.resources)
-                .producer
-                .add_inputs(&state.tick, inputs);
-            state.wait_for_producer_output::<Self::Producer>(p)
-        });
-        state.map(out, |_, out| out.0)
-    }
-    fn make_many<const AMOUNT: u32>(
-        state: &mut GameState,
-        p: Priority,
-    ) -> WakeHandle<Bundle<Self, AMOUNT>> {
-        if let Ok(x) = state.resources.resource_store.get().bundle() {
-            state.nowait(x)
-        } else {
-            state.multiple(|state| Self::make_one(state, p))
-        }
-    }
 }
 
 impl ProducerMakeable for IronOre {
@@ -390,10 +435,10 @@ impl ProducerMakeable for RedScience {
     type Producer = HandCrafter<RedScienceRecipe>;
 }
 impl<R: MachineMakeable> ProducerMakeable for R {
-    type Producer = MachineStorage<R::Machine>;
+    type Producer = MultiMachine<R::Machine>;
 }
 
-trait MachineMakeable: ResourceType + Any + Sized {
+pub trait MachineMakeable: ResourceType + Any + Sized {
     type Machine: Machine<Recipe: ConstRecipe<BundledInputs: Makeable>>
         + SingleOutputMachine<Output: IsBundle<Resource = Self>>
         + Makeable;
@@ -428,8 +473,9 @@ where
 trait ConstMakeable {
     const MAKE: Self;
 }
-impl<T: ConstMakeable + Any> Makeable for T {
-    fn make(state: &mut GameState, _p: Priority) -> WakeHandle<Self> {
+impl<T: ConstMakeable + Any> InputMakeable for T {
+    type Input = ();
+    fn make_from_input(state: &mut GameState, _p: Priority, _: ()) -> WakeHandle<Self> {
         state.nowait(Self::MAKE)
     }
 }

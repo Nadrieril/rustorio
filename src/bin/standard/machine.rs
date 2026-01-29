@@ -80,7 +80,7 @@ where
     }
 }
 
-pub enum MachineStorage<M: Machine> {
+pub enum MultiMachine<M: Machine> {
     /// We have no machines; we may craft by hand if the recipe allows.
     NoMachine {
         /// Inputs gathered while there was no constructed machine.
@@ -94,21 +94,21 @@ pub enum MachineStorage<M: Machine> {
     Removed,
 }
 
-impl<M: Machine> MachineStorage<M> {
+impl<M: Machine> MultiMachine<M> {
     pub fn is_present(&self) -> bool {
         matches!(self, Self::Present(vec) if !vec.is_empty())
     }
     pub fn count(&self) -> u32 {
         match self {
-            MachineStorage::NoMachine { .. } | MachineStorage::Removed => 0,
-            MachineStorage::Present(machines) => machines.len() as u32,
+            MultiMachine::NoMachine { .. } | MultiMachine::Removed => 0,
+            MultiMachine::Present(machines) => machines.len() as u32,
         }
     }
 
     pub fn add(&mut self, tick: &Tick, mut m: M) {
         println!("adding a {}", std::any::type_name::<M>());
         match self {
-            MachineStorage::NoMachine { inputs, outputs } => {
+            MultiMachine::NoMachine { inputs, outputs } => {
                 for input in mem::take(inputs) {
                     m.add_inputs(tick, input);
                 }
@@ -117,7 +117,7 @@ impl<M: Machine> MachineStorage<M> {
                 }
                 *self = Self::Present(vec![m])
             }
-            MachineStorage::Present(items) => {
+            MultiMachine::Present(items) => {
                 // Get inputs from the other machines to average out the load.
                 let total_load: u32 = items.iter_mut().map(|m| m.input_load(tick)).sum();
                 let average_load: u32 = total_load / ((items.len() + 1) as u32);
@@ -130,7 +130,7 @@ impl<M: Machine> MachineStorage<M> {
                 }
                 items.push(m)
             }
-            MachineStorage::Removed => {
+            MultiMachine::Removed => {
                 panic!("trying to craft with a removed {}", type_name::<M>())
             }
         }
@@ -151,18 +151,18 @@ impl<M: Machine> MachineStorage<M> {
             Self::Removed => panic!("trying to craft with a removed {}", type_name::<M>()),
         }
     }
-    pub fn take_map<N: Machine>(&mut self, f: impl Fn(M) -> N) -> MachineStorage<N> {
+    pub fn take_map<N: Machine>(&mut self, f: impl Fn(M) -> N) -> MultiMachine<N> {
         match mem::replace(self, Self::Removed) {
-            Self::NoMachine { .. } => MachineStorage::default(),
-            Self::Present(vec) => MachineStorage::Present(vec.into_iter().map(|m| f(m)).collect()),
-            Self::Removed => MachineStorage::Removed,
+            Self::NoMachine { .. } => MultiMachine::default(),
+            Self::Present(vec) => MultiMachine::Present(vec.into_iter().map(|m| f(m)).collect()),
+            Self::Removed => MultiMachine::Removed,
         }
     }
 
     fn poll(&mut self, tick: &Tick) -> Option<<M::Recipe as ConstRecipe>::BundledOutputs> {
         match self {
-            MachineStorage::NoMachine { outputs, .. } => outputs.pop(),
-            MachineStorage::Present(machines) => {
+            MultiMachine::NoMachine { outputs, .. } => outputs.pop(),
+            MultiMachine::Present(machines) => {
                 for m in machines {
                     if let Some(o) = m.pop_outputs(tick) {
                         return Some(o);
@@ -170,12 +170,12 @@ impl<M: Machine> MachineStorage<M> {
                 }
                 None
             }
-            MachineStorage::Removed => None,
+            MultiMachine::Removed => None,
         }
     }
 }
 
-impl<M: Machine> Default for MachineStorage<M> {
+impl<M: Machine> Default for MultiMachine<M> {
     fn default() -> Self {
         Self::NoMachine {
             inputs: Default::default(),
@@ -299,7 +299,7 @@ impl<Ore: ResourceType + Any> Producer for Territory<Ore> {
     }
 }
 
-impl<M> Producer for MachineStorage<M>
+impl<M> Producer for MultiMachine<M>
 where
     M: Machine + Makeable,
 {
@@ -316,15 +316,15 @@ where
     }
     fn report_load(&mut self, tick: &Tick) -> Option<String> {
         match self {
-            MachineStorage::Present(machines) => Some(
+            MultiMachine::Present(machines) => Some(
                 machines
                     .iter_mut()
                     .map(|m| m.input_load(tick).to_string())
                     .format(" ")
                     .to_string(),
             ),
-            MachineStorage::NoMachine { .. } => None,
-            MachineStorage::Removed => None,
+            MultiMachine::NoMachine { .. } => None,
+            MultiMachine::Removed => None,
         }
     }
 
@@ -380,7 +380,7 @@ impl<Ore: ResourceType + Any> HandProducer for Territory<Ore> {
         ControlFlow::Break(AdvancedTick)
     }
 }
-impl<M> HandProducer for MachineStorage<M>
+impl<M> HandProducer for MultiMachine<M>
 where
     M: Machine + Makeable,
     M::Recipe: HandRecipe<InputBundle = <M::Recipe as ConstRecipe>::BundledInputs>,
