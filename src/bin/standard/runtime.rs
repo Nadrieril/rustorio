@@ -29,6 +29,9 @@ impl<T> RestrictMut<T> {
     pub fn as_mut(&mut self, _: RestrictMutToken) -> &mut T {
         &mut self.0
     }
+    pub fn into_inner(self) -> T {
+        self.0
+    }
 }
 impl<T> Deref for RestrictMut<T> {
     type Target = T;

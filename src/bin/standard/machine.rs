@@ -223,17 +223,15 @@ pub trait Producer: Any + Sized {
         Box::new(|state| state.never())
     }
     /// Trigger a scaling up. This ensures we don't scale up many times in parallel.
-    fn trigger_scale_up(p: Priority) -> Box<dyn FnOnce(&mut GameState)> {
+    fn trigger_scale_up(p: Priority) -> Box<dyn FnOnce(&mut GameState) -> WakeHandle<()>> {
         Box::new(move |state| {
             eprintln!("scaling up {}", type_name::<Self>());
             let this = Self::get_ref(&mut state.resources);
-            if !this.is_scaling_up {
-                this.is_scaling_up = true;
-                let h = this.producer.scale_up(p)(state);
-                state.map(h, |state, _| {
-                    Self::get_ref(&mut state.resources).is_scaling_up = false;
-                });
-            }
+            this.scaling_up += 1;
+            let h = this.producer.scale_up(p)(state);
+            state.map(h, |state, _| {
+                Self::get_ref(&mut state.resources).scaling_up -= 1;
+            })
         })
     }
 }
@@ -274,11 +272,23 @@ impl<Ore: ResourceType + Any> Producer for Territory<Ore> {
     }
 
     fn scale_up(&self, p: Priority) -> Box<dyn FnOnce(&mut GameState) -> WakeHandle<()>> {
-        if self.num_miners() < self.max_miners() {
-            Box::new(move |state| state.add_miner::<Ore>(p))
-        } else {
-            Box::new(|state| state.never())
-        }
+        let num_miners = self.num_miners();
+        let max_miners = self.max_miners();
+        Box::new(move |state| {
+            let this = Self::get_ref(&mut state.resources);
+            if num_miners + this.scaling_up <= max_miners {
+                let inputs = state.make(p);
+                state.map(inputs, move |state, (iron, copper)| {
+                    let miner = Miner::build(iron, copper);
+                    Self::get_ref(&mut state.resources)
+                        .producer
+                        .add_miner(&state.tick, miner)
+                        .unwrap();
+                })
+            } else {
+                state.never()
+            }
+        })
     }
 }
 
@@ -428,16 +438,15 @@ impl<O: Clone + Any> Producer for OnceMaker<O> {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Priority(pub u8);
+pub struct Priority(pub u16);
 
 /// A producer along with a queue of items waiting on it.
 pub struct ProducerWithQueue<P: Producer> {
     pub producer: P,
     /// Keep sorted by priority.
     pub queue: VecDeque<(WakeHandle<P::Output>, Priority)>,
-    /// Whether we're in the process of adding a new producing entity (so we don't add several at
-    /// the same time).
-    pub is_scaling_up: bool,
+    /// Number of producing entities we're in the process of building.
+    pub scaling_up: u32,
 }
 
 impl<P: Producer> ProducerWithQueue<P> {
@@ -445,7 +454,7 @@ impl<P: Producer> ProducerWithQueue<P> {
         Self {
             producer,
             queue: Default::default(),
-            is_scaling_up: Default::default(),
+            scaling_up: Default::default(),
         }
     }
 
@@ -479,9 +488,11 @@ impl<P: Producer> ProducerWithQueue<P> {
 
     /// Checks if scaling up may be needed. If so, return a function to be called on the game state
     /// to schedule a scale up.
-    pub fn scale_up_if_needed(&mut self) -> Option<Box<dyn FnOnce(&mut GameState)>> {
-        if !self.is_scaling_up
-            && self.queue.len() > self.producer.available_parallelism() as usize * 3
+    pub fn scale_up_if_needed(
+        &mut self,
+    ) -> Option<Box<dyn FnOnce(&mut GameState) -> WakeHandle<()>>> {
+        if self.queue.len()
+            > (self.producer.available_parallelism() + self.scaling_up * 12) as usize * 4
         {
             let p = self.queue.front().unwrap().1;
             let p = Priority(p.0 + 1);
@@ -508,17 +519,7 @@ impl<P: Producer> ProducerWithQueue<P> {
 
 impl GameState {
     pub fn add_miner<R: ResourceType + Any>(&mut self, p: Priority) -> WakeHandle<()> {
-        let inputs = self.make(p);
-        self.map(inputs, move |state, (iron, copper)| {
-            let miner = Miner::build(iron, copper);
-            state
-                .resources
-                .producers
-                .territory::<R>()
-                .producer
-                .add_miner(&state.tick, miner)
-                .unwrap();
-        })
+        <Territory<R>>::trigger_scale_up(p)(self)
     }
 
     pub fn add_machine<M: Machine + Makeable>(&mut self, p: Priority) -> WakeHandle<()> {

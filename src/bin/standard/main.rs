@@ -11,7 +11,7 @@ use crafting::{ConstRecipe, Makeable};
 use indexmap::IndexMap;
 use rustorio::{
     self, Bundle, HandRecipe, Resource, ResourceType, Tick,
-    buildings::Assembler,
+    buildings::{Assembler, Furnace},
     gamemodes::Standard,
     recipes::{
         CopperSmelting, CopperWireRecipe, ElectronicCircuitRecipe, IronSmelting, PointRecipe,
@@ -111,7 +111,7 @@ pub trait ErasedProducer: Any {
     fn load(&self) -> usize;
     fn report_load(&mut self, tick: &Tick) -> String;
     fn update(&mut self, tick: &Tick, waiters: &mut WaiterQueue);
-    fn scale_up_if_needed(&mut self) -> Option<Box<dyn FnOnce(&mut GameState)>>;
+    fn scale_up_if_needed(&mut self) -> Option<Box<dyn FnOnce(&mut GameState) -> WakeHandle<()>>>;
 }
 impl<P: Producer> ErasedProducer for ProducerWithQueue<P> {
     fn name(&self) -> &'static str {
@@ -134,7 +134,7 @@ impl<P: Producer> ErasedProducer for ProducerWithQueue<P> {
     fn update(&mut self, tick: &Tick, waiters: &mut WaiterQueue) {
         self.update(tick, waiters);
     }
-    fn scale_up_if_needed(&mut self) -> Option<Box<dyn FnOnce(&mut GameState)>> {
+    fn scale_up_if_needed(&mut self) -> Option<Box<dyn FnOnce(&mut GameState) -> WakeHandle<()>>> {
         self.scale_up_if_needed()
     }
 }
@@ -194,12 +194,12 @@ impl GameState {
     fn play(mut self) -> (Tick, Bundle<Point, 200>) {
         let p = Priority(1);
         // Start with this one otherwise we're stuck.
-        // <MachineStorage<Furnace<IronSmelting>>>::trigger_scale_up(&mut self);
+        // <MachineStorage<Furnace<IronSmelting>>>::trigger_scale_up(p)(&mut self);
         self.add_furnace::<IronSmelting>(p);
-        self.add_furnace::<CopperSmelting>(p);
+        // self.add_furnace::<CopperSmelting>(p);
 
         self.add_miner::<IronOre>(p);
-        self.add_miner::<CopperOre>(p);
+        // self.add_miner::<CopperOre>(p);
 
         self.add_furnace::<IronSmelting>(p);
         self.add_furnace::<CopperSmelting>(p);
@@ -207,37 +207,29 @@ impl GameState {
         let h = self.add_assembler::<CopperWireRecipe>(p);
         self.complete(h);
 
-        self.add_furnace::<IronSmelting>(p);
-        self.add_furnace::<IronSmelting>(p);
+        // self.add_furnace::<IronSmelting>(p);
+        // self.add_furnace::<IronSmelting>(p);
         self.add_miner::<IronOre>(p);
         self.add_miner::<IronOre>(p);
 
-        self.add_furnace::<IronSmelting>(p);
+        // self.add_furnace::<IronSmelting>(p);
         // self.add_miner::<CopperOre>(p);
         // self.add_miner::<CopperOre>(p);
         // self.add_miner::<CopperOre>(p);
         // self.add_miner::<IronOre>(p);
         // self.add_furnace::<CopperSmelting>(p);
 
-        self.add_assembler::<ElectronicCircuitRecipe>(p);
+        // self.add_assembler::<ElectronicCircuitRecipe>(p);
 
         self.add_lab::<SteelTechnology>(p);
 
         self.add_furnace::<SteelSmelting>(p);
         // self.add_furnace::<SteelSmelting>(p);
 
-        self.add_assembler::<PointRecipe>(p);
-
         let points = self.make(Priority(0));
 
-        eprintln!("starting!");
-        let points: Bundle<Point, 100> = self.complete(points);
+        let points: Bundle<Point, 200> = self.complete(points);
 
-        panic!(
-            "WIP: in {} ticks, got {}",
-            self.tick.cur(),
-            type_name_of_val(&points),
-        );
-        // (self.tick, points)
+        (self.tick.into_inner(), points)
     }
 }
