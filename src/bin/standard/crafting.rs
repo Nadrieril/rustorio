@@ -16,7 +16,9 @@ use rustorio_engine::research::TechRecipe;
 
 use crate::{
     GameState,
-    machine::{HandCrafter, Machine, MachineStorage, OnceMaker, Producer, ProducerWithQueue},
+    machine::{
+        HandCrafter, Machine, MachineStorage, OnceMaker, Priority, Producer, ProducerWithQueue,
+    },
     scheduler::WakeHandle,
 };
 
@@ -213,37 +215,37 @@ impl<P: Producer<Output = (O,)>, O> SingleOutputProducer for P {
 }
 
 pub trait Makeable: Any + Sized {
-    fn make(state: &mut GameState) -> WakeHandle<Self>;
+    fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self>;
 }
 impl Makeable for () {
-    fn make(state: &mut GameState) -> WakeHandle<Self> {
+    fn make(state: &mut GameState, _p: Priority) -> WakeHandle<Self> {
         state.nowait(())
     }
 }
 impl<T: Makeable> Makeable for (T,) {
-    fn make(state: &mut GameState) -> WakeHandle<Self> {
-        let h = T::make(state);
+    fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
+        let h = T::make(state, p);
         state.map(h, |_, v| (v,))
     }
 }
 impl<A: Makeable, B: Makeable> Makeable for (A, B) {
-    fn make(state: &mut GameState) -> WakeHandle<Self> {
-        let a = A::make(state);
-        let b = B::make(state);
+    fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
+        let a = A::make(state, p);
+        let b = B::make(state, p);
         state.pair(a, b)
     }
 }
 impl<A: Makeable, B: Makeable, C: Makeable> Makeable for (A, B, C) {
-    fn make(state: &mut GameState) -> WakeHandle<Self> {
-        let a = A::make(state);
-        let b = B::make(state);
-        let c = C::make(state);
+    fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
+        let a = A::make(state, p);
+        let b = B::make(state, p);
+        let c = C::make(state, p);
         state.triple(a, b, c)
     }
 }
 
 impl Makeable for SteelSmelting {
-    fn make(state: &mut GameState) -> WakeHandle<Self> {
+    fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
         if state
             .resources
             .producers
@@ -251,7 +253,7 @@ impl Makeable for SteelSmelting {
             .producer
             .start()
         {
-            let research_points = state.make();
+            let research_points = state.make(p);
             state.map(research_points, |state, research_points| {
                 let steel_tech = state.resources.steel_technology.take().unwrap();
                 let (steel_smelting, points_tech) = steel_tech.research(research_points);
@@ -270,11 +272,11 @@ impl Makeable for SteelSmelting {
                 state.resources.points_technology = Some(points_tech);
             });
         }
-        state.wait_for_producer_output::<OnceMaker<Self>>()
+        state.wait_for_producer_output::<OnceMaker<Self>>(p)
     }
 }
 impl Makeable for PointRecipe {
-    fn make(state: &mut GameState) -> WakeHandle<Self> {
+    fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
         if state
             .resources
             .producers
@@ -282,7 +284,7 @@ impl Makeable for PointRecipe {
             .producer
             .start()
         {
-            let research_points = state.make();
+            let research_points = state.make(p);
             state.map(research_points, |state, research_points| {
                 let points_tech = state.resources.points_technology.take().unwrap();
                 let points_recipe = points_tech.research(research_points);
@@ -294,7 +296,7 @@ impl Makeable for PointRecipe {
                     .set(points_recipe);
             });
         }
-        state.wait_for_producer_output::<OnceMaker<Self>>()
+        state.wait_for_producer_output::<OnceMaker<Self>>(p)
     }
 }
 
@@ -302,8 +304,8 @@ impl<R> Makeable for Furnace<R>
 where
     R: FurnaceRecipe + Recipe + Makeable,
 {
-    fn make(state: &mut GameState) -> WakeHandle<Self> {
-        let inputs = state.make();
+    fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
+        let inputs = state.make(p);
         state.map(inputs, |state, (r, iron)| {
             Furnace::build(&state.tick, r, iron)
         })
@@ -313,16 +315,16 @@ impl<R> Makeable for Assembler<R>
 where
     R: AssemblerRecipe + Recipe + Makeable,
 {
-    fn make(state: &mut GameState) -> WakeHandle<Self> {
-        let inputs = state.make();
+    fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
+        let inputs = state.make(p);
         state.map(inputs, |state, (r, copper_wire, iron)| {
             Assembler::build(&state.tick, r, copper_wire, iron)
         })
     }
 }
 impl Makeable for Lab<SteelTechnology> {
-    fn make(state: &mut GameState) -> WakeHandle<Self> {
-        let inputs = state.make();
+    fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
+        let inputs = state.make(p);
         state.map(inputs, move |state, (iron, copper)| {
             let tech = state.resources.steel_technology.as_ref().unwrap();
             Lab::build(&state.tick, tech, iron, copper)
@@ -330,8 +332,8 @@ impl Makeable for Lab<SteelTechnology> {
     }
 }
 impl Makeable for Lab<PointsTechnology> {
-    fn make(state: &mut GameState) -> WakeHandle<Self> {
-        let inputs = state.make();
+    fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
+        let inputs = state.make(p);
         state.map(inputs, move |state, (iron, copper, steel_smelting)| {
             // Wait for the steel smelting recipe, because it also sets up the points tech.
             let _: SteelSmelting = steel_smelting;
@@ -342,8 +344,8 @@ impl Makeable for Lab<PointsTechnology> {
 }
 
 impl<const AMOUNT: u32, R: ProducerMakeable> Makeable for Bundle<R, AMOUNT> {
-    fn make(state: &mut GameState) -> WakeHandle<Self> {
-        R::make_many(state)
+    fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
+        R::make_many(state, p)
     }
 }
 
@@ -358,19 +360,23 @@ trait ProducerMakeable: ResourceType + Sized + Any {
 
     fn make_one(
         state: &mut GameState,
+        p: Priority,
     ) -> WakeHandle<<Self::Producer as SingleOutputProducer>::Output> {
-        let inputs = state.make();
-        let out = state.then(inputs, |state, inputs| {
+        let inputs = state.make(p);
+        let out = state.then(inputs, move |state, inputs| {
             Self::start_production(state, inputs);
-            state.wait_for_producer_output::<Self::Producer>()
+            state.wait_for_producer_output::<Self::Producer>(p)
         });
         state.map(out, |_, out| out.0)
     }
-    fn make_many<const AMOUNT: u32>(state: &mut GameState) -> WakeHandle<Bundle<Self, AMOUNT>> {
+    fn make_many<const AMOUNT: u32>(
+        state: &mut GameState,
+        p: Priority,
+    ) -> WakeHandle<Bundle<Self, AMOUNT>> {
         if let Ok(x) = state.resources.resource_store.get().bundle() {
             state.nowait(x)
         } else {
-            state.multiple(|state| Self::make_one(state))
+            state.multiple(|state| Self::make_one(state, p))
         }
     }
 }
@@ -444,7 +450,7 @@ trait ConstMakeable {
     const MAKE: Self;
 }
 impl<T: ConstMakeable + Any> Makeable for T {
-    fn make(state: &mut GameState) -> WakeHandle<Self> {
+    fn make(state: &mut GameState, _p: Priority) -> WakeHandle<Self> {
         state.nowait(Self::MAKE)
     }
 }
@@ -463,8 +469,8 @@ impl ConstMakeable for ElectronicCircuitRecipe {
 }
 
 impl GameState {
-    pub fn make<T: Makeable>(&mut self) -> WakeHandle<T> {
-        T::make(self)
+    pub fn make<T: Makeable>(&mut self, p: Priority) -> WakeHandle<T> {
+        T::make(self, p)
     }
 
     /// Given a producer of a single bundle of an item, make a producer of a larger bundle.

@@ -419,10 +419,14 @@ impl<O: Clone + Any> Producer for OnceMaker<O> {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Priority(pub u8);
+
 /// A producer along with a queue of items waiting on it.
 pub struct ProducerWithQueue<P: Producer> {
     pub producer: P,
-    pub queue: VecDeque<WakeHandle<P::Output>>,
+    /// Keep sorted by priority.
+    pub queue: VecDeque<(WakeHandle<P::Output>, Priority)>,
     /// Whether we're in the process of adding a new producing entity (so we don't add several at
     /// the same time).
     pub is_scaling_up: bool,
@@ -437,13 +441,20 @@ impl<P: Producer> ProducerWithQueue<P> {
         }
     }
 
-    pub fn enqueue(&mut self, tick: &Tick, waiters: &mut WaiterQueue, h: WakeHandle<P::Output>) {
+    pub fn enqueue(
+        &mut self,
+        tick: &Tick,
+        waiters: &mut WaiterQueue,
+        h: WakeHandle<P::Output>,
+        p: Priority,
+    ) {
         if self.queue.is_empty()
             && let Some(output) = self.producer.poll(tick)
         {
             waiters.set_output(h, output);
         } else {
-            self.queue.push_back(h);
+            self.queue.push_back((h, p));
+            self.queue.make_contiguous().sort_by_key(|(_, p)| *p);
         }
     }
 
@@ -451,7 +462,7 @@ impl<P: Producer> ProducerWithQueue<P> {
         while !self.queue.is_empty()
             && let Some(output) = self.producer.poll(tick)
         {
-            let h = self.queue.pop_front().unwrap();
+            let (h, _) = self.queue.pop_front().unwrap();
             waiters.set_output(h, output);
         }
     }
@@ -488,7 +499,7 @@ impl<P: Producer> ProducerWithQueue<P> {
 
 impl GameState {
     pub fn add_miner<R: ResourceType + Any>(&mut self) -> WakeHandle<()> {
-        let inputs = self.make();
+        let inputs = self.make(Priority(10));
         self.map(inputs, move |state, (iron, copper)| {
             let miner = Miner::build(iron, copper);
             state
@@ -502,7 +513,7 @@ impl GameState {
     }
 
     pub fn add_machine<M: Machine + Makeable>(&mut self) -> WakeHandle<()> {
-        let machine = self.make();
+        let machine = self.make(Priority(10));
         self.map(machine, move |state, machine: M| {
             state
                 .resources

@@ -106,7 +106,7 @@ impl GameState {
                 return ret;
             }
             self.tick_fwd();
-            if self.tick.cur() > 3000 {
+            if self.tick.cur() > 10000 {
                 panic!("ticked too far?")
             }
         }

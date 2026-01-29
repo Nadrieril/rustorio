@@ -8,7 +8,11 @@ use std::{
 use indexmap::IndexMap;
 use rustorio::{Resource, ResourceType};
 
-use crate::{GameState, crafting::IsBundle, machine::Producer};
+use crate::{
+    GameState,
+    crafting::IsBundle,
+    machine::{Priority, Producer},
+};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WakeHandleId(u32);
@@ -370,7 +374,7 @@ impl GameState {
 
     /// Waits for the selected producer to produce a single output bundle.
     /// This is the main wait point of our system.
-    pub fn wait_for_producer_output<P: Producer>(&mut self) -> WakeHandle<P::Output> {
+    pub fn wait_for_producer_output<P: Producer>(&mut self, p: Priority) -> WakeHandle<P::Output> {
         struct W<P>(PhantomData<P>);
         impl<P: Producer> Waiter for W<P> {
             type Output = P::Output;
@@ -379,7 +383,7 @@ impl GameState {
             }
         }
         let h = self.queue.enqueue_waiter(W(PhantomData::<P>));
-        P::get_ref(&mut self.resources).enqueue(&self.tick, &mut self.queue, h);
+        P::get_ref(&mut self.resources).enqueue(&self.tick, &mut self.queue, h, p);
         h
     }
 
