@@ -11,7 +11,7 @@ use crafting::{ConstRecipe, Makeable};
 use indexmap::IndexMap;
 use rustorio::{
     self, Bundle, HandRecipe, Resource, ResourceType, Technology, Tick,
-    buildings::Assembler,
+    buildings::{Assembler, Furnace},
     gamemodes::Standard,
     recipes::{CopperSmelting, CopperWireRecipe, IronSmelting, RedScienceRecipe, SteelSmelting},
     research::SteelTechnology,
@@ -143,7 +143,10 @@ impl Resources {
     ) -> &mut ProducerWithQueue<HandCrafter<R>> {
         self.or_insert_producer(|| HandCrafter::<R>::default())
     }
-    pub fn once_maker<O: Clone + Any>(&mut self) -> &mut ProducerWithQueue<OnceMaker<O>> {
+    pub fn once_maker<O: Clone + Any>(&mut self) -> &mut ProducerWithQueue<OnceMaker<O>>
+    where
+        TheFirstTime<O>: Makeable,
+    {
         self.or_insert_producer(|| OnceMaker::<O>::default())
     }
 }
@@ -181,8 +184,8 @@ impl GameState {
     fn play(mut self) -> (Tick, Bundle<Point, 200>) {
         let p = Priority(1);
         // Start with this one otherwise we're stuck.
-        // <MachineStorage<Furnace<IronSmelting>>>::trigger_scale_up(p)(&mut self);
-        self.add_furnace::<IronSmelting>(p);
+        self.scale_up::<MultiMachine<Furnace<IronSmelting>>>(p);
+        // self.add_furnace::<IronSmelting>(p);
         // self.add_furnace::<CopperSmelting>(p);
 
         self.add_miner::<IronOre>(p);
@@ -199,6 +202,7 @@ impl GameState {
         self.add_miner::<IronOre>(p);
         self.add_miner::<IronOre>(p);
 
+        // self.scale_up::<OnceMaker<SteelSmelting>>(p);
         // self.add_furnace::<IronSmelting>(p);
         // self.add_miner::<CopperOre>(p);
         // self.add_miner::<CopperOre>(p);
@@ -209,6 +213,7 @@ impl GameState {
         // self.add_assembler::<ElectronicCircuitRecipe>(p);
 
         self.add_lab::<SteelTechnology>(p);
+        // self.scale_up::<OnceMaker<PointRecipe>>(p);
 
         self.add_furnace::<SteelSmelting>(p);
         // self.add_furnace::<SteelSmelting>(p);

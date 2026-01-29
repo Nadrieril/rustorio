@@ -18,6 +18,7 @@ use crate::{
     GameState,
     machine::{
         HandCrafter, Machine, MultiMachine, OnceMaker, Priority, Producer, ProducerWithQueue,
+        TheFirstTime,
     },
     scheduler::WakeHandle,
 };
@@ -236,40 +237,6 @@ impl<const N: usize, T: Makeable> Makeable for [T; N] {
     }
 }
 
-impl Makeable for SteelSmelting {
-    fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
-        if state.resources.once_maker::<Self>().producer.start() {
-            let research_points = state.make(p);
-            state.map(research_points, |state, research_points| {
-                let steel_tech: SteelTechnology = state.resources.tech().take().unwrap();
-                let (steel_smelting, points_tech) = steel_tech.research(research_points);
-                let pqw = state.resources.machine::<Lab<SteelTechnology>>();
-                assert_eq!(pqw.queue.len(), 0);
-                let lab = pqw
-                    .producer
-                    .take_map(|lab| lab.change_technology(&points_tech).unwrap());
-                *state.resources.machine() = ProducerWithQueue::new(lab);
-                state.resources.once_maker().producer.set(steel_smelting);
-                *state.resources.tech() = Some(points_tech);
-            });
-        }
-        state.feed_producer::<OnceMaker<Self>>(p, ())
-    }
-}
-impl Makeable for PointRecipe {
-    fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
-        if state.resources.once_maker::<Self>().producer.start() {
-            let research_points = state.make(p);
-            state.map(research_points, |state, research_points| {
-                let points_tech: PointsTechnology = state.resources.tech().take().unwrap();
-                let points_recipe = points_tech.research(research_points);
-                state.resources.once_maker().producer.set(points_recipe);
-            });
-        }
-        state.feed_producer::<OnceMaker<Self>>(p, ())
-    }
-}
-
 /// Items that can be produced from a given makeable input.
 trait InputMakeable: Sized + Any {
     type Input: Makeable;
@@ -355,6 +322,55 @@ impl InputMakeable for TechAvailable<PointsTechnology> {
         _input: Self::Input,
     ) -> WakeHandle<Self> {
         state.nowait(Self(PhantomData))
+    }
+}
+
+impl InputMakeable for TheFirstTime<SteelSmelting> {
+    type Input = Bundle<ResearchPoint<SteelTechnology>, 20>;
+
+    fn make_from_input(
+        state: &mut GameState,
+        _p: Priority,
+        research_points: Self::Input,
+    ) -> WakeHandle<Self> {
+        let steel_tech: SteelTechnology = state.resources.tech().take().unwrap();
+        let (steel_smelting, points_tech) = steel_tech.research(research_points);
+        let pqw = state.resources.machine::<Lab<SteelTechnology>>();
+        assert_eq!(pqw.queue.len(), 0);
+        let lab = pqw
+            .producer
+            .take_map(|lab| lab.change_technology(&points_tech).unwrap());
+        *state.resources.machine() = ProducerWithQueue::new(lab);
+        *state.resources.tech() = Some(points_tech);
+        state.nowait(TheFirstTime(steel_smelting))
+    }
+}
+impl Makeable for SteelSmelting {
+    fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
+        // If we let scaling up happen automatically, we apparently lose ticks :(
+        state.scale_up::<OnceMaker<Self>>(p);
+        state.feed_producer::<OnceMaker<Self>>(p, ())
+    }
+}
+
+impl InputMakeable for TheFirstTime<PointRecipe> {
+    type Input = Bundle<ResearchPoint<PointsTechnology>, 50>;
+
+    fn make_from_input(
+        state: &mut GameState,
+        _p: Priority,
+        research_points: Self::Input,
+    ) -> WakeHandle<Self> {
+        let points_tech: PointsTechnology = state.resources.tech().take().unwrap();
+        let points_recipe = points_tech.research(research_points);
+        state.nowait(TheFirstTime(points_recipe))
+    }
+}
+impl Makeable for PointRecipe {
+    fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
+        // If we let scaling up happen automatically, we apparently lose ticks :(
+        state.scale_up::<OnceMaker<Self>>(p);
+        state.feed_producer::<OnceMaker<Self>>(p, ())
     }
 }
 

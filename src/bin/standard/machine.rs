@@ -336,7 +336,12 @@ where
     }
 
     fn scale_up(&self, p: Priority) -> Box<dyn FnOnce(&mut GameState) -> WakeHandle<()>> {
-        Box::new(move |state| state.add_machine::<M>(p))
+        Box::new(move |state| {
+            let machine = state.make(p);
+            state.map(machine, move |state, machine: M| {
+                state.resources.machine().producer.add(&state.tick, machine);
+            })
+        })
     }
 }
 
@@ -402,24 +407,31 @@ where
     }
 }
 
+/// Wrapper for resources that we only need to make once. The first time we query the resource will
+/// trigger the making of this, and subsequent times will reuse the already-produced resource.
+pub struct TheFirstTime<R>(pub R);
+
 /// Producer that represents items that are produced only once.
 pub struct OnceMaker<O> {
     is_started: bool,
     output: Option<O>,
 }
 impl<O> OnceMaker<O> {
-    /// Track that the producer has started. If the production had already started, this returns
-    /// `false`;
-    pub fn start(&mut self) -> bool {
-        let already_started = self.is_started;
-        self.is_started = true;
-        !already_started
-    }
-    pub fn is_started(&self) -> bool {
-        self.is_started
-    }
-    pub fn set(&mut self, x: O) {
-        self.output = Some(x);
+    pub fn ensure_made(state: &mut GameState, p: Priority) -> WakeHandle<()>
+    where
+        O: Clone,
+        TheFirstTime<O>: Makeable,
+    {
+        let this = &mut Self::get_ref(&mut state.resources).producer;
+        if !this.is_started {
+            this.is_started = true;
+            let first_time = state.make(p);
+            state.map(first_time, |state, TheFirstTime(o)| {
+                Self::get_ref(&mut state.resources).producer.output = Some(o);
+            })
+        } else {
+            state.nowait(())
+        }
     }
 }
 impl<O> Default for OnceMaker<O> {
@@ -431,7 +443,10 @@ impl<O> Default for OnceMaker<O> {
     }
 }
 
-impl<O: Clone + Any> Producer for OnceMaker<O> {
+impl<O: Clone + Any> Producer for OnceMaker<O>
+where
+    TheFirstTime<O>: Makeable,
+{
     type Input = ();
     type Output = O;
     fn name() -> &'static str {
@@ -441,12 +456,27 @@ impl<O: Clone + Any> Producer for OnceMaker<O> {
         resources.once_maker()
     }
     fn available_parallelism(&self) -> u32 {
-        1
+        self.output.is_some() as u32
     }
 
     fn add_inputs(&mut self, _tick: &Tick, _inputs: Self::Input) {}
     fn poll(&mut self, _tick: &Tick) -> Option<Self::Output> {
         self.output.clone()
+    }
+
+    fn scale_up(&self, p: Priority) -> Box<dyn FnOnce(&mut GameState) -> WakeHandle<()>> {
+        Box::new(move |state| {
+            let this = &mut Self::get_ref(&mut state.resources).producer;
+            if !this.is_started {
+                this.is_started = true;
+                let first_time = state.make(p);
+                state.map(first_time, |state, TheFirstTime(o)| {
+                    Self::get_ref(&mut state.resources).producer.output = Some(o);
+                })
+            } else {
+                state.nowait(())
+            }
+        })
     }
 }
 
@@ -531,15 +561,19 @@ impl<P: Producer> ProducerWithQueue<P> {
 }
 
 impl GameState {
+    /// Enqueue the creation of a new producing entity for this producer type.
+    pub fn scale_up<P: Producer>(&mut self, p: Priority) -> WakeHandle<()> {
+        <P>::trigger_scale_up(p)(self)
+    }
+
     pub fn add_miner<R: ResourceType + Any>(&mut self, p: Priority) -> WakeHandle<()> {
-        <Territory<R>>::trigger_scale_up(p)(self)
+        self.scale_up::<Territory<R>>(p)
     }
 
     pub fn add_machine<M: Machine + Makeable>(&mut self, p: Priority) -> WakeHandle<()> {
-        let machine = self.make(p);
-        self.map(machine, move |state, machine: M| {
-            state.resources.machine().producer.add(&state.tick, machine);
-        })
+        // self.scale_up::<MultiMachine<M>>(p)
+        // If we use `trigger_scale_up` then we lose some parallelism :(
+        <MultiMachine<M>>::scale_up(&self.resources.machine().producer, p)(&mut *self)
     }
     pub fn add_assembler<R>(&mut self, p: Priority) -> WakeHandle<()>
     where
