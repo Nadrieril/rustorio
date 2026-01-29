@@ -75,16 +75,16 @@ where
 }
 
 pub enum MachineStorage<M: Machine> {
-    /// The machine isn't there; craft by hand.
+    /// We have no machines; we may craft by hand if the recipe allows.
     NoMachine {
         /// Inputs gathered while there was no constructed machine.
         inputs: Vec<<M::Recipe as ConstRecipe>::BundledInputs>,
         /// Outputs handcrafted while there was no constructed machine (if relevant).
         outputs: Vec<<M::Recipe as ConstRecipe>::BundledOutputs>,
     },
-    /// The machine is there.
+    /// We have machines.
     Present(Vec<M>),
-    /// We removed that machine; error when trying to craft.
+    /// We removed those machines; error when trying to craft.
     Removed,
 }
 
@@ -196,30 +196,25 @@ pub trait Producer: Any + Sized {
 
     /// Schedule the addition of a new producing entity of this type. This is called when the load
     /// becomes too high compared to the available parallelism.
-    fn scale_up(state: &mut GameState) -> WakeHandle<()>;
+    fn scale_up(state: &mut GameState) -> WakeHandle<()> {
+        state.never()
+    }
 }
 
 impl<R: HandRecipe + ConstRecipe + Any> Producer for HandCrafter<R> {
     type Output = <R as ConstRecipe>::BundledOutputs;
-
     fn name() -> &'static str {
         std::any::type_name::<R>()
     }
-
     fn get_ref(resources: &mut Resources) -> &mut ProducerWithQueue<Self> {
         resources.producers.hand_crafter()
     }
-
     fn available_parallelism(&self) -> u32 {
-        0
+        1
     }
 
     fn poll(&mut self, _tick: &Tick) -> Option<Self::Output> {
         self.outputs.pop()
-    }
-
-    fn scale_up(state: &mut GameState) -> WakeHandle<()> {
-        state.never()
     }
 }
 
@@ -334,6 +329,52 @@ where
     }
 }
 
+/// Producer that represents items that are produced only once.
+pub struct OnceMaker<O> {
+    is_started: bool,
+    output: Option<O>,
+}
+impl<O> OnceMaker<O> {
+    /// Track that the producer has started. If the production had already started, this returns
+    /// `false`;
+    pub fn start(&mut self) -> bool {
+        let already_started = self.is_started;
+        self.is_started = true;
+        !already_started
+    }
+    pub fn is_started(&self) -> bool {
+        self.is_started
+    }
+    pub fn set(&mut self, x: O) {
+        self.output = Some(x);
+    }
+}
+impl<O> Default for OnceMaker<O> {
+    fn default() -> Self {
+        Self {
+            is_started: false,
+            output: None,
+        }
+    }
+}
+
+impl<O: Clone + Any> Producer for OnceMaker<O> {
+    type Output = O;
+    fn name() -> &'static str {
+        type_name::<Self>()
+    }
+    fn get_ref(resources: &mut Resources) -> &mut ProducerWithQueue<Self> {
+        resources.producers.once_maker()
+    }
+    fn available_parallelism(&self) -> u32 {
+        1
+    }
+
+    fn poll(&mut self, _tick: &Tick) -> Option<Self::Output> {
+        self.output.clone()
+    }
+}
+
 /// A producer along with a queue of items waiting on it.
 pub struct ProducerWithQueue<P: Producer> {
     pub producer: P,
@@ -376,8 +417,9 @@ impl<P: Producer> ProducerWithQueue<P> {
     pub fn scale_up_if_needed(&mut self) -> Option<fn(&mut GameState)> {
         if !self.is_scaling_up
             && false
-            && self.queue.len() > self.producer.available_parallelism() as usize * 5
+            && self.queue.len() > self.producer.available_parallelism() as usize * 3
         {
+            eprintln!("scaling up {}", type_name::<P>());
             fn scale_up<P: Producer>(state: &mut GameState) {
                 if !P::get_ref(&mut state.resources).is_scaling_up {
                     P::get_ref(&mut state.resources).is_scaling_up = true;

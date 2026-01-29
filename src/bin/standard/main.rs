@@ -2,7 +2,7 @@
 #![feature(generic_const_exprs, try_trait_v2, never_type)]
 #![allow(incomplete_features)]
 use std::{
-    any::{Any, TypeId},
+    any::{Any, TypeId, type_name_of_val},
     collections::HashMap,
     ops::ControlFlow,
 };
@@ -59,43 +59,48 @@ impl ResourceStore {
 /// A store of producers.
 #[derive(Default)]
 pub struct ProducerStore {
-    /// Maps the type id of `M` to a `MachineStorage<M>`, of `O` to `Territory<O>`, of `R` to
-    /// `HandCrafter<R>`.
     map: HashMap<TypeId, Box<dyn ErasedProducer>>,
 }
 impl ProducerStore {
-    pub fn machine<M: Machine + Makeable>(&mut self) -> &mut ProducerWithQueue<MachineStorage<M>> {
+    fn or_insert<P: Producer>(&mut self, f: impl FnOnce() -> P) -> &mut ProducerWithQueue<P> {
         let storage: &mut (dyn ErasedProducer + 'static) = self
             .map
-            .entry(TypeId::of::<M>())
-            .or_insert_with(|| Box::new(ProducerWithQueue::new(MachineStorage::<M>::default())))
+            .entry(TypeId::of::<P>())
+            .or_insert_with(|| Box::new(ProducerWithQueue::new(f())))
             .as_mut();
         let storage: &mut (dyn Any + 'static) = storage;
         storage.downcast_mut().unwrap()
     }
-    pub fn add_territory<O: ResourceType + Any>(&mut self, t: Territory<O>) {
+    fn insert<P: Producer>(&mut self, p: P) {
         self.map
-            .insert(TypeId::of::<O>(), Box::new(ProducerWithQueue::new(t)));
+            .insert(TypeId::of::<P>(), Box::new(ProducerWithQueue::new(p)));
     }
-    pub fn territory<O: ResourceType + Any>(&mut self) -> &mut ProducerWithQueue<Territory<O>> {
+    fn get<P: Producer>(&mut self) -> &mut ProducerWithQueue<P> {
         let storage: &mut (dyn ErasedProducer + 'static) =
-            self.map.get_mut(&TypeId::of::<O>()).unwrap().as_mut();
-        let storage: &mut (dyn Any + 'static) = storage;
-        storage.downcast_mut().unwrap()
-    }
-    pub fn hand_crafter<R: HandRecipe + ConstRecipe>(
-        &mut self,
-    ) -> &mut ProducerWithQueue<HandCrafter<R>> {
-        let storage: &mut (dyn ErasedProducer + 'static) = self
-            .map
-            .entry(TypeId::of::<R>())
-            .or_insert_with(|| Box::new(ProducerWithQueue::new(HandCrafter::<R>::default())))
-            .as_mut();
+            self.map.get_mut(&TypeId::of::<P>()).unwrap().as_mut();
         let storage: &mut (dyn Any + 'static) = storage;
         storage.downcast_mut().unwrap()
     }
     pub fn iter(&mut self) -> impl Iterator<Item = &mut dyn ErasedProducer> {
         self.map.values_mut().map(|s| s.as_mut())
+    }
+
+    pub fn machine<M: Machine + Makeable>(&mut self) -> &mut ProducerWithQueue<MachineStorage<M>> {
+        self.or_insert(|| MachineStorage::<M>::default())
+    }
+    pub fn add_territory<O: ResourceType + Any>(&mut self, t: Territory<O>) {
+        self.insert(t);
+    }
+    pub fn territory<O: ResourceType + Any>(&mut self) -> &mut ProducerWithQueue<Territory<O>> {
+        self.get()
+    }
+    pub fn hand_crafter<R: HandRecipe + ConstRecipe>(
+        &mut self,
+    ) -> &mut ProducerWithQueue<HandCrafter<R>> {
+        self.or_insert(|| HandCrafter::<R>::default())
+    }
+    pub fn once_maker<O: Clone + Any>(&mut self) -> &mut ProducerWithQueue<OnceMaker<O>> {
+        self.or_insert(|| OnceMaker::<O>::default())
     }
 }
 
@@ -137,8 +142,6 @@ impl<P: HandProducer> ErasedHandProducer for ProducerWithQueue<P> {
 pub struct Resources {
     steel_technology: Option<SteelTechnology>,
     points_technology: Option<PointsTechnology>,
-    steel_smelting: Option<SteelSmelting>,
-    points_recipe: Option<PointRecipe>,
 
     resource_store: ResourceStore,
     producers: ProducerStore,
@@ -189,8 +192,24 @@ impl GameState {
         self.add_miner::<CopperOre>();
 
         self.add_furnace::<IronSmelting>();
-        self.add_furnace::<IronSmelting>();
         self.add_furnace::<CopperSmelting>();
+        // self.add_miner::<IronOre>();
+        // self.add_miner::<CopperOre>();
+
+        self.add_furnace::<IronSmelting>();
+        // self.add_furnace::<IronSmelting>();
+        // self.add_furnace::<IronSmelting>();
+        // self.add_furnace::<CopperSmelting>();
+        // self.add_furnace::<CopperSmelting>();
+        // self.add_furnace::<CopperSmelting>();
+
+        // self.add_miner::<IronOre>();
+        // self.add_miner::<IronOre>();
+        // self.add_miner::<IronOre>();
+        // self.add_miner::<CopperOre>();
+        // self.add_miner::<CopperOre>();
+        // self.add_miner::<CopperOre>();
+
         let h = self.add_assembler::<CopperWireRecipe>();
         self.complete(h);
 
@@ -198,27 +217,18 @@ impl GameState {
 
         self.add_lab::<SteelTechnology>();
 
-        // self.add_miner(|r| &mut r.iron_territory);
-        // self.add_furnace(IronSmelting);
-        // self.add_miner(|r| &mut r.copper_territory);
-        // self.add_furnace(CopperSmelting);
-
-        // self.add_assembler(CopperWireRecipe);
-        // self.add_assembler(ElectronicCircuitRecipe);
-
         self.add_furnace::<SteelSmelting>();
-
-        // self.add_lab(|r| &r.points_technology, |r| &mut r.points_lab);
+        // self.add_furnace::<SteelSmelting>();
 
         self.add_assembler::<PointRecipe>();
 
-        // self.add_miner(|r| &mut r.iron_territory);
-        // self.add_furnace(IronSmelting);
-
-        let points: WakeHandle<Bundle<Point, 10>> = self.make();
-        let _ = self.complete(points);
-        todo!("WIP: {}", self.tick.cur())
-        // let points = self.complete(points);
+        let points = self.make();
+        let points: Bundle<Point, 50> = self.complete(points);
+        panic!(
+            "WIP: in {} ticks, got {}",
+            self.tick.cur(),
+            type_name_of_val(&points),
+        );
         // (self.tick, points)
     }
 }

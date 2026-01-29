@@ -16,7 +16,7 @@ use rustorio_engine::research::TechRecipe;
 
 use crate::{
     GameState,
-    machine::{HandCrafter, Machine, MachineStorage, Producer, ProducerWithQueue},
+    machine::{HandCrafter, Machine, MachineStorage, OnceMaker, Producer, ProducerWithQueue},
     scheduler::WakeHandle,
 };
 
@@ -227,9 +227,13 @@ impl<A: Makeable, B: Makeable, C: Makeable> Makeable for (A, B, C) {
 
 impl Makeable for SteelSmelting {
     fn make(state: &mut GameState) -> WakeHandle<Self> {
-        if let Some(recipe) = state.resources.steel_smelting {
-            state.nowait(recipe)
-        } else {
+        if state
+            .resources
+            .producers
+            .once_maker::<Self>()
+            .producer
+            .start()
+        {
             let research_points = state.make();
             state.map(research_points, |state, research_points| {
                 let steel_tech = state.resources.steel_technology.take().unwrap();
@@ -240,26 +244,40 @@ impl Makeable for SteelSmelting {
                     .producer
                     .take_map(|lab| lab.change_technology(&points_tech).unwrap());
                 *state.resources.producers.machine() = ProducerWithQueue::new(lab);
-                state.resources.steel_smelting = Some(steel_smelting);
+                state
+                    .resources
+                    .producers
+                    .once_maker()
+                    .producer
+                    .set(steel_smelting);
                 state.resources.points_technology = Some(points_tech);
-                steel_smelting
-            })
+            });
         }
+        state.wait_for_producer_output::<OnceMaker<Self>>()
     }
 }
 impl Makeable for PointRecipe {
     fn make(state: &mut GameState) -> WakeHandle<Self> {
-        if let Some(recipe) = state.resources.points_recipe {
-            state.nowait(recipe)
-        } else {
+        if state
+            .resources
+            .producers
+            .once_maker::<Self>()
+            .producer
+            .start()
+        {
             let research_points = state.make();
             state.map(research_points, |state, research_points| {
                 let points_tech = state.resources.points_technology.take().unwrap();
                 let points_recipe = points_tech.research(research_points);
-                state.resources.points_recipe = Some(points_recipe);
-                points_recipe
-            })
+                state
+                    .resources
+                    .producers
+                    .once_maker()
+                    .producer
+                    .set(points_recipe);
+            });
         }
+        state.wait_for_producer_output::<OnceMaker<Self>>()
     }
 }
 
@@ -327,7 +345,7 @@ trait ProducerMakeable: ResourceType + Sized + Any {
         let inputs = state.make();
         let out = state.then(inputs, |state, inputs| {
             Self::start_production(state, inputs);
-            state.wait_for_producer_output(Self::Producer::get_ref)
+            state.wait_for_producer_output::<Self::Producer>()
         });
         state.map(out, |_, out| out.0)
     }

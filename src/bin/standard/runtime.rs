@@ -73,7 +73,8 @@ impl GameState {
     }
 
     pub fn report_loads(&mut self) {
-        if self.tick.cur() / 50 == self.last_reported_tick / 50 {
+        const REPORT_PERIOD: u64 = 100;
+        if self.tick.cur() / REPORT_PERIOD == self.last_reported_tick / REPORT_PERIOD {
             return;
         }
         self.last_reported_tick = self.tick.cur();
@@ -93,7 +94,7 @@ impl GameState {
                 )
             })
             .format("");
-        eprintln!("{}:\n{}", self.tick.as_ref(), loads)
+        eprintln!("{}:\n{}", self.tick.as_ref(), loads);
     }
 
     pub fn complete<R: Any>(&mut self, h: WakeHandle<R>) -> R {
