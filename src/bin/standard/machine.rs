@@ -5,6 +5,7 @@ use std::{
     ops::ControlFlow,
 };
 
+use itertools::Itertools;
 use rustorio::{
     Bundle, HandRecipe, Recipe, ResourceType, Technology, Tick,
     buildings::{Assembler, Furnace, Lab},
@@ -31,15 +32,19 @@ pub trait Machine: Any {
     fn add_inputs(&mut self, tick: &Tick, inputs: <Self::Recipe as ConstRecipe>::BundledInputs) {
         Self::Recipe::add_inputs(self.inputs(tick), inputs);
     }
-    fn get_outputs(
-        &mut self,
-        tick: &Tick,
-    ) -> Option<<Self::Recipe as ConstRecipe>::BundledOutputs> {
-        Self::Recipe::get_outputs(&mut self.outputs(tick))
+    /// Used to load-balance across machines of the same type.
+    fn pop_inputs(&mut self, tick: &Tick) -> Option<<Self::Recipe as ConstRecipe>::BundledInputs> {
+        Self::Recipe::pop_inputs(&mut self.inputs(tick))
     }
     /// Used when we handcrafted some values, to have somewhere to store them.
     fn add_outputs(&mut self, tick: &Tick, outputs: <Self::Recipe as ConstRecipe>::BundledOutputs) {
         Self::Recipe::add_outputs(self.outputs(tick), outputs);
+    }
+    fn pop_outputs(
+        &mut self,
+        tick: &Tick,
+    ) -> Option<<Self::Recipe as ConstRecipe>::BundledOutputs> {
+        Self::Recipe::pop_outputs(&mut self.outputs(tick))
     }
 }
 
@@ -111,7 +116,19 @@ impl<M: Machine> MachineStorage<M> {
                 }
                 *self = Self::Present(vec![m])
             }
-            MachineStorage::Present(items) => items.push(m),
+            MachineStorage::Present(items) => {
+                // Get inputs from the other machines to average out the load.
+                let total_load: u32 = items.iter_mut().map(|m| m.input_load(tick)).sum();
+                let average_load: u32 = total_load / ((items.len() + 1) as u32);
+                for n in items.iter_mut() {
+                    while n.input_load(tick) > average_load
+                        && let Some(input) = n.pop_inputs(tick)
+                    {
+                        m.add_inputs(tick, input);
+                    }
+                }
+                items.push(m)
+            }
             MachineStorage::Removed => {
                 panic!("trying to craft with a removed {}", type_name::<M>())
             }
@@ -146,7 +163,7 @@ impl<M: Machine> MachineStorage<M> {
             MachineStorage::NoMachine { outputs, .. } => outputs.pop(),
             MachineStorage::Present(machines) => {
                 for m in machines {
-                    if let Some(o) = m.get_outputs(tick) {
+                    if let Some(o) = m.pop_outputs(tick) {
                         return Some(o);
                     }
                 }
@@ -190,6 +207,11 @@ pub trait Producer: Any + Sized {
 
     /// Count the number of producing entities (miners, assemblers, ..) available.
     fn available_parallelism(&self) -> u32;
+
+    /// Detailed load reporting, if available.
+    fn report_load(&mut self, _tick: &Tick) -> Option<String> {
+        None
+    }
 
     /// Update the producer and yield an output if one is ready.
     fn poll(&mut self, tick: &Tick) -> Option<Self::Output>;
@@ -249,13 +271,24 @@ where
     fn name() -> &'static str {
         std::any::type_name::<M::Recipe>()
     }
-
     fn get_ref(resources: &mut Resources) -> &mut ProducerWithQueue<Self> {
         resources.producers.machine::<M>()
     }
-
     fn available_parallelism(&self) -> u32 {
         self.count()
+    }
+    fn report_load(&mut self, tick: &Tick) -> Option<String> {
+        match self {
+            MachineStorage::Present(machines) => Some(
+                machines
+                    .iter_mut()
+                    .map(|m| m.input_load(tick).to_string())
+                    .format(" ")
+                    .to_string(),
+            ),
+            MachineStorage::NoMachine { .. } => None,
+            MachineStorage::Removed => None,
+        }
     }
 
     fn poll(&mut self, tick: &Tick) -> Option<Self::Output> {

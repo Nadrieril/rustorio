@@ -108,6 +108,7 @@ pub trait ErasedProducer: Any {
     fn name(&self) -> &'static str;
     fn available_parallelism(&self) -> u32;
     fn load(&self) -> usize;
+    fn report_load(&mut self, tick: &Tick) -> String;
     fn update(&mut self, tick: &Tick, waiters: &mut WaiterQueue);
     fn scale_up_if_needed(&mut self) -> Option<fn(&mut GameState)>;
 }
@@ -120,6 +121,14 @@ impl<P: Producer> ErasedProducer for ProducerWithQueue<P> {
     }
     fn load(&self) -> usize {
         self.queue.len()
+    }
+    fn report_load(&mut self, tick: &Tick) -> String {
+        let load = self.load();
+        if let Some(s) = self.producer.report_load(tick) {
+            format!("{load} -- {s}")
+        } else {
+            load.to_string()
+        }
     }
     fn update(&mut self, tick: &Tick, waiters: &mut WaiterQueue) {
         self.update(tick, waiters);
@@ -193,25 +202,21 @@ impl GameState {
 
         self.add_furnace::<IronSmelting>();
         self.add_furnace::<CopperSmelting>();
-        // self.add_miner::<IronOre>();
-        // self.add_miner::<CopperOre>();
-
-        self.add_furnace::<IronSmelting>();
-        // self.add_furnace::<IronSmelting>();
-        // self.add_furnace::<IronSmelting>();
-        // self.add_furnace::<CopperSmelting>();
-        // self.add_furnace::<CopperSmelting>();
-        // self.add_furnace::<CopperSmelting>();
-
-        // self.add_miner::<IronOre>();
-        // self.add_miner::<IronOre>();
-        // self.add_miner::<IronOre>();
-        // self.add_miner::<CopperOre>();
-        // self.add_miner::<CopperOre>();
-        // self.add_miner::<CopperOre>();
 
         let h = self.add_assembler::<CopperWireRecipe>();
         self.complete(h);
+
+        self.add_furnace::<IronSmelting>();
+        self.add_furnace::<IronSmelting>();
+        self.add_miner::<IronOre>();
+        self.add_miner::<IronOre>();
+
+        self.add_furnace::<IronSmelting>();
+        // self.add_miner::<CopperOre>();
+        // self.add_miner::<CopperOre>();
+        // self.add_miner::<CopperOre>();
+        // self.add_miner::<IronOre>();
+        // self.add_furnace::<CopperSmelting>();
 
         self.add_assembler::<ElectronicCircuitRecipe>();
 
@@ -223,7 +228,10 @@ impl GameState {
         self.add_assembler::<PointRecipe>();
 
         let points = self.make();
+
+        eprintln!("starting!");
         let points: Bundle<Point, 50> = self.complete(points);
+
         panic!(
             "WIP: in {} ticks, got {}",
             self.tick.cur(),

@@ -90,7 +90,7 @@ impl GameState {
                     " - {} (x{}): {}\n",
                     p.name(),
                     p.available_parallelism(),
-                    p.load()
+                    p.report_load(&self.tick)
                 )
             })
             .format("");

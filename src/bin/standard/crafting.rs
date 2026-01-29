@@ -56,12 +56,14 @@ pub const fn tup2_field1<A: Copy, B: Copy>(x: (A, B)) -> B {
 pub trait ConstRecipeImpl<const INPUT_N: u32>: Recipe {
     type BundledInputs_;
     type BundledOutputs_;
-    fn add_inputs(to: &mut Self::Inputs, i: Self::BundledInputs_);
-    fn get_outputs(from: &mut Self::Outputs) -> Option<Self::BundledOutputs_>;
-    /// Used when we handcrafted some values, to have somewhere to store them.
-    fn add_outputs(to: &mut Self::Outputs, o: Self::BundledOutputs_);
     /// Count the number of recipe instances left in this input bundle.
     fn input_load(input: &Self::Inputs) -> u32;
+    fn add_inputs(to: &mut Self::Inputs, i: Self::BundledInputs_);
+    /// Used to load-balance across machines of the same type.
+    fn pop_inputs(from: &mut Self::Inputs) -> Option<Self::BundledInputs_>;
+    /// Used when we handcrafted some values, to have somewhere to store them.
+    fn add_outputs(to: &mut Self::Outputs, o: Self::BundledOutputs_);
+    fn pop_outputs(from: &mut Self::Outputs) -> Option<Self::BundledOutputs_>;
 }
 
 impl<R, I, O> ConstRecipeImpl<1> for R
@@ -75,17 +77,20 @@ where
 {
     type BundledInputs_ = (Bundle<I, { tup1_field0(R::INPUT_AMOUNTS) }>,);
     type BundledOutputs_ = (Bundle<O, { tup1_field0(R::OUTPUT_AMOUNTS) }>,);
+    fn input_load(input: &Self::Inputs) -> u32 {
+        input.0.amount() / R::INPUT_AMOUNTS.0
+    }
     fn add_inputs(to: &mut Self::Inputs, i: Self::BundledInputs_) {
         to.0.add(i.0);
     }
-    fn get_outputs(from: &mut Self::Outputs) -> Option<Self::BundledOutputs_> {
+    fn pop_inputs(from: &mut Self::Inputs) -> Option<Self::BundledInputs_> {
         Some((from.0.bundle().ok()?,))
     }
     fn add_outputs(to: &mut Self::Outputs, o: Self::BundledOutputs_) {
         to.0.add(o.0);
     }
-    fn input_load(input: &Self::Inputs) -> u32 {
-        input.0.amount() / R::INPUT_AMOUNTS.0
+    fn pop_outputs(from: &mut Self::Outputs) -> Option<Self::BundledOutputs_> {
+        Some((from.0.bundle().ok()?,))
     }
 }
 
@@ -105,18 +110,25 @@ where
         Bundle<I2, { tup2_field1(R::INPUT_AMOUNTS) }>,
     );
     type BundledOutputs_ = (Bundle<O, { tup1_field0(R::OUTPUT_AMOUNTS) }>,);
+    fn input_load(input: &Self::Inputs) -> u32 {
+        input.0.amount() / R::INPUT_AMOUNTS.0
+    }
     fn add_inputs(to: &mut Self::Inputs, i: Self::BundledInputs_) {
         to.0.add(i.0);
         to.1.add(i.1);
     }
-    fn get_outputs(from: &mut Self::Outputs) -> Option<Self::BundledOutputs_> {
-        Some((from.0.bundle().ok()?,))
+    fn pop_inputs(from: &mut Self::Inputs) -> Option<Self::BundledInputs_> {
+        if from.0.amount() >= R::INPUT_AMOUNTS.0 && from.1.amount() >= R::INPUT_AMOUNTS.1 {
+            Some((from.0.bundle().ok()?, from.1.bundle().ok()?))
+        } else {
+            None
+        }
     }
     fn add_outputs(to: &mut Self::Outputs, o: Self::BundledOutputs_) {
         to.0.add(o.0);
     }
-    fn input_load(input: &Self::Inputs) -> u32 {
-        input.0.amount() / R::INPUT_AMOUNTS.0
+    fn pop_outputs(from: &mut Self::Outputs) -> Option<Self::BundledOutputs_> {
+        Some((from.0.bundle().ok()?,))
     }
 }
 
@@ -157,27 +169,32 @@ impl InputN for PointRecipe {
 pub trait ConstRecipe: Recipe + InputN + Any {
     type BundledInputs;
     type BundledOutputs;
-    fn add_inputs(to: &mut Self::Inputs, i: Self::BundledInputs);
-    fn get_outputs(from: &mut Self::Outputs) -> Option<Self::BundledOutputs>;
-    /// Used when we handcrafted some values, to have somewhere to store them.
-    fn add_outputs(to: &mut Self::Outputs, o: Self::BundledOutputs);
     /// Count the number of recipe instances left in this input bundle.
     fn input_load(input: &Self::Inputs) -> u32;
+    fn add_inputs(to: &mut Self::Inputs, i: Self::BundledInputs);
+    /// Used to load-balance across machines of the same type.
+    fn pop_inputs(from: &mut Self::Inputs) -> Option<Self::BundledInputs>;
+    /// Used when we handcrafted some values, to have somewhere to store them.
+    fn add_outputs(to: &mut Self::Outputs, o: Self::BundledOutputs);
+    fn pop_outputs(from: &mut Self::Outputs) -> Option<Self::BundledOutputs>;
 }
 impl<R: Recipe + InputN + Any + ConstRecipeImpl<{ R::INPUT_N }>> ConstRecipe for R {
     type BundledInputs = <R as ConstRecipeImpl<{ R::INPUT_N }>>::BundledInputs_;
     type BundledOutputs = <R as ConstRecipeImpl<{ R::INPUT_N }>>::BundledOutputs_;
-    fn add_inputs(to: &mut Self::Inputs, i: Self::BundledInputs) {
-        <R as ConstRecipeImpl<{ R::INPUT_N }>>::add_inputs(to, i);
-    }
-    fn get_outputs(from: &mut Self::Outputs) -> Option<Self::BundledOutputs> {
-        <R as ConstRecipeImpl<{ R::INPUT_N }>>::get_outputs(from)
-    }
     fn input_load(input: &Self::Inputs) -> u32 {
         <R as ConstRecipeImpl<{ R::INPUT_N }>>::input_load(input)
     }
+    fn add_inputs(to: &mut Self::Inputs, i: Self::BundledInputs) {
+        <R as ConstRecipeImpl<{ R::INPUT_N }>>::add_inputs(to, i);
+    }
+    fn pop_inputs(from: &mut Self::Inputs) -> Option<Self::BundledInputs> {
+        <R as ConstRecipeImpl<{ R::INPUT_N }>>::pop_inputs(from)
+    }
     fn add_outputs(to: &mut Self::Outputs, o: Self::BundledOutputs) {
         <R as ConstRecipeImpl<{ R::INPUT_N }>>::add_outputs(to, o)
+    }
+    fn pop_outputs(from: &mut Self::Outputs) -> Option<Self::BundledOutputs> {
+        <R as ConstRecipeImpl<{ R::INPUT_N }>>::pop_outputs(from)
     }
 }
 
