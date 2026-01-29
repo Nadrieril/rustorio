@@ -42,6 +42,53 @@ impl<const AMOUNT: u32, R: ResourceType> IsBundle for (Bundle<R, AMOUNT>,) {
     }
 }
 
+/// A tuple of `Bundle<R, N>`.
+pub trait MultiBundle: Sized {
+    /// The corresponding tuple of `Resource<R>`.
+    type AsResource;
+
+    /// Count the number of bundle tuples available in the given resource tuple.
+    fn bundle_count(res: &Self::AsResource) -> u32;
+    /// Add the bundle tuple to the resource tuple.
+    fn add(res: &mut Self::AsResource, bundle: Self);
+    /// Pop a bundle tuple from a resource tuple, if there are enough resources.
+    fn bundle(res: &mut Self::AsResource) -> Option<Self>;
+}
+
+impl<R1: ResourceType, const N1: u32> MultiBundle for (Bundle<R1, N1>,) {
+    type AsResource = (Resource<R1>,);
+
+    fn bundle_count(res: &Self::AsResource) -> u32 {
+        res.0.amount() / N1
+    }
+    fn add(res: &mut Self::AsResource, bundle: Self) {
+        res.0 += bundle.0;
+    }
+    fn bundle(res: &mut Self::AsResource) -> Option<Self> {
+        Some((res.0.bundle().ok()?,))
+    }
+}
+impl<R1: ResourceType, const N1: u32, R2: ResourceType, const N2: u32> MultiBundle
+    for (Bundle<R1, N1>, Bundle<R2, N2>)
+{
+    type AsResource = (Resource<R1>, Resource<R2>);
+
+    fn bundle_count(res: &Self::AsResource) -> u32 {
+        std::cmp::min(res.0.amount() / N1, res.1.amount() / N2)
+    }
+    fn add(res: &mut Self::AsResource, bundle: Self) {
+        res.0 += bundle.0;
+        res.1 += bundle.1;
+    }
+    fn bundle(res: &mut Self::AsResource) -> Option<Self> {
+        if res.0.amount() >= N1 && res.1.amount() >= N2 {
+            Some((res.0.bundle().ok()?, res.1.bundle().ok()?))
+        } else {
+            None
+        }
+    }
+}
+
 // Const fns because direct field access is not allowed in const exprs.
 pub const fn tup1_field0<A: Copy>(x: (A,)) -> A {
     x.0
@@ -56,16 +103,8 @@ pub const fn tup2_field1<A: Copy, B: Copy>(x: (A, B)) -> B {
 /// Trait to compute statically-counted inputs and outputs. The const generic is needed because the
 /// impls would otherwise be considered to overlap.
 pub trait ConstRecipeImpl<const INPUT_N: u32>: Recipe {
-    type BundledInputs_;
-    type BundledOutputs_;
-    /// Count the number of recipe instances left in this input bundle.
-    fn input_load(input: &Self::Inputs) -> u32;
-    fn add_inputs(to: &mut Self::Inputs, i: Self::BundledInputs_);
-    /// Used to load-balance across machines of the same type.
-    fn pop_inputs(from: &mut Self::Inputs) -> Option<Self::BundledInputs_>;
-    /// Used when we handcrafted some values, to have somewhere to store them.
-    fn add_outputs(to: &mut Self::Outputs, o: Self::BundledOutputs_);
-    fn pop_outputs(from: &mut Self::Outputs) -> Option<Self::BundledOutputs_>;
+    type BundledInputs_: MultiBundle<AsResource = Self::Inputs>;
+    type BundledOutputs_: MultiBundle<AsResource = Self::Outputs>;
 }
 
 impl<R, I, O> ConstRecipeImpl<1> for R
@@ -79,21 +118,6 @@ where
 {
     type BundledInputs_ = (Bundle<I, { tup1_field0(R::INPUT_AMOUNTS) }>,);
     type BundledOutputs_ = (Bundle<O, { tup1_field0(R::OUTPUT_AMOUNTS) }>,);
-    fn input_load(input: &Self::Inputs) -> u32 {
-        input.0.amount() / R::INPUT_AMOUNTS.0
-    }
-    fn add_inputs(to: &mut Self::Inputs, i: Self::BundledInputs_) {
-        to.0.add(i.0);
-    }
-    fn pop_inputs(from: &mut Self::Inputs) -> Option<Self::BundledInputs_> {
-        Some((from.0.bundle().ok()?,))
-    }
-    fn add_outputs(to: &mut Self::Outputs, o: Self::BundledOutputs_) {
-        to.0.add(o.0);
-    }
-    fn pop_outputs(from: &mut Self::Outputs) -> Option<Self::BundledOutputs_> {
-        Some((from.0.bundle().ok()?,))
-    }
 }
 
 impl<R, I1, I2, O> ConstRecipeImpl<2> for R
@@ -112,26 +136,6 @@ where
         Bundle<I2, { tup2_field1(R::INPUT_AMOUNTS) }>,
     );
     type BundledOutputs_ = (Bundle<O, { tup1_field0(R::OUTPUT_AMOUNTS) }>,);
-    fn input_load(input: &Self::Inputs) -> u32 {
-        input.0.amount() / R::INPUT_AMOUNTS.0
-    }
-    fn add_inputs(to: &mut Self::Inputs, i: Self::BundledInputs_) {
-        to.0.add(i.0);
-        to.1.add(i.1);
-    }
-    fn pop_inputs(from: &mut Self::Inputs) -> Option<Self::BundledInputs_> {
-        if from.0.amount() >= R::INPUT_AMOUNTS.0 && from.1.amount() >= R::INPUT_AMOUNTS.1 {
-            Some((from.0.bundle().ok()?, from.1.bundle().ok()?))
-        } else {
-            None
-        }
-    }
-    fn add_outputs(to: &mut Self::Outputs, o: Self::BundledOutputs_) {
-        to.0.add(o.0);
-    }
-    fn pop_outputs(from: &mut Self::Outputs) -> Option<Self::BundledOutputs_> {
-        Some((from.0.bundle().ok()?,))
-    }
 }
 
 /// Provides the `INPUT_N` to pass to `ConstRecipe`. This is weird af but seems to work.
@@ -169,35 +173,12 @@ impl InputN for PointRecipe {
 
 /// Trait to compute statically-counted inputs and outputs.
 pub trait ConstRecipe: Recipe + InputN + Any {
-    type BundledInputs;
-    type BundledOutputs;
-    /// Count the number of recipe instances left in this input bundle.
-    fn input_load(input: &Self::Inputs) -> u32;
-    fn add_inputs(to: &mut Self::Inputs, i: Self::BundledInputs);
-    /// Used to load-balance across machines of the same type.
-    fn pop_inputs(from: &mut Self::Inputs) -> Option<Self::BundledInputs>;
-    /// Used when we handcrafted some values, to have somewhere to store them.
-    fn add_outputs(to: &mut Self::Outputs, o: Self::BundledOutputs);
-    fn pop_outputs(from: &mut Self::Outputs) -> Option<Self::BundledOutputs>;
+    type BundledInputs: MultiBundle<AsResource = Self::Inputs>;
+    type BundledOutputs: MultiBundle<AsResource = Self::Outputs>;
 }
 impl<R: Recipe + InputN + Any + ConstRecipeImpl<{ R::INPUT_N }>> ConstRecipe for R {
     type BundledInputs = <R as ConstRecipeImpl<{ R::INPUT_N }>>::BundledInputs_;
     type BundledOutputs = <R as ConstRecipeImpl<{ R::INPUT_N }>>::BundledOutputs_;
-    fn input_load(input: &Self::Inputs) -> u32 {
-        <R as ConstRecipeImpl<{ R::INPUT_N }>>::input_load(input)
-    }
-    fn add_inputs(to: &mut Self::Inputs, i: Self::BundledInputs) {
-        <R as ConstRecipeImpl<{ R::INPUT_N }>>::add_inputs(to, i);
-    }
-    fn pop_inputs(from: &mut Self::Inputs) -> Option<Self::BundledInputs> {
-        <R as ConstRecipeImpl<{ R::INPUT_N }>>::pop_inputs(from)
-    }
-    fn add_outputs(to: &mut Self::Outputs, o: Self::BundledOutputs) {
-        <R as ConstRecipeImpl<{ R::INPUT_N }>>::add_outputs(to, o)
-    }
-    fn pop_outputs(from: &mut Self::Outputs) -> Option<Self::BundledOutputs> {
-        <R as ConstRecipeImpl<{ R::INPUT_N }>>::pop_outputs(from)
-    }
 }
 
 pub trait SingleOutputMachine:
@@ -366,6 +347,7 @@ impl InputMakeable for Lab<SteelTechnology> {
         _p: Priority,
         (iron, copper): Self::Input,
     ) -> WakeHandle<Self> {
+        // TODO: figure out something clever to manage technologies. Token<Tech>?
         let tech = state.resources.steel_technology.as_ref().unwrap();
         let lab = Lab::build(&state.tick, tech, iron, copper);
         state.nowait(lab)

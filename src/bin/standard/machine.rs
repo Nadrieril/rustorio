@@ -17,7 +17,7 @@ use rustorio_engine::research::TechRecipe;
 
 use crate::{
     GameState, Resources,
-    crafting::{ConstRecipe, Makeable},
+    crafting::{ConstRecipe, Makeable, MultiBundle},
     scheduler::{WaiterQueue, WakeHandle},
 };
 
@@ -28,24 +28,24 @@ pub trait Machine: Any {
 
     /// The number of input bundles currently in the machine.
     fn input_load(&mut self, tick: &Tick) -> u32 {
-        Self::Recipe::input_load(self.inputs(tick))
+        <Self::Recipe as ConstRecipe>::BundledInputs::bundle_count(self.inputs(tick))
     }
     fn add_inputs(&mut self, tick: &Tick, inputs: <Self::Recipe as ConstRecipe>::BundledInputs) {
-        Self::Recipe::add_inputs(self.inputs(tick), inputs);
+        <Self::Recipe as ConstRecipe>::BundledInputs::add(self.inputs(tick), inputs);
     }
     /// Used to load-balance across machines of the same type.
     fn pop_inputs(&mut self, tick: &Tick) -> Option<<Self::Recipe as ConstRecipe>::BundledInputs> {
-        Self::Recipe::pop_inputs(&mut self.inputs(tick))
+        <Self::Recipe as ConstRecipe>::BundledInputs::bundle(&mut self.inputs(tick))
     }
     /// Used when we handcrafted some values, to have somewhere to store them.
     fn add_outputs(&mut self, tick: &Tick, outputs: <Self::Recipe as ConstRecipe>::BundledOutputs) {
-        Self::Recipe::add_outputs(self.outputs(tick), outputs);
+        <Self::Recipe as ConstRecipe>::BundledOutputs::add(self.outputs(tick), outputs);
     }
     fn pop_outputs(
         &mut self,
         tick: &Tick,
     ) -> Option<<Self::Recipe as ConstRecipe>::BundledOutputs> {
-        Self::Recipe::pop_outputs(&mut self.outputs(tick))
+        <Self::Recipe as ConstRecipe>::BundledOutputs::bundle(&mut self.outputs(tick))
     }
 }
 
