@@ -56,8 +56,8 @@ pub trait ErasedProducer: Any {
     fn available_parallelism(&self) -> u32;
     fn load(&self) -> usize;
     fn report_load(&mut self, tick: &Tick) -> String;
-    fn update(&mut self, tick: &Tick, waiters: &mut WaiterQueue);
-    fn scale_up_if_needed(&mut self) -> Option<Box<dyn FnOnce(&mut GameState) -> WakeHandle<()>>>;
+    fn update(&mut self, tick: &Tick, waiters: &mut CallBackQueue);
+    fn scale_up_if_needed(&mut self) -> Option<Box<dyn FnOnce(&mut GameState)>>;
 }
 impl<P: Producer> ErasedProducer for ProducerWithQueue<P> {
     fn name(&self) -> String {
@@ -77,10 +77,10 @@ impl<P: Producer> ErasedProducer for ProducerWithQueue<P> {
             load.to_string()
         }
     }
-    fn update(&mut self, tick: &Tick, waiters: &mut WaiterQueue) {
+    fn update(&mut self, tick: &Tick, waiters: &mut CallBackQueue) {
         self.update(tick, waiters);
     }
-    fn scale_up_if_needed(&mut self) -> Option<Box<dyn FnOnce(&mut GameState) -> WakeHandle<()>>> {
+    fn scale_up_if_needed(&mut self) -> Option<Box<dyn FnOnce(&mut GameState)>> {
         self.scale_up_if_needed()
     }
 }

@@ -9,7 +9,7 @@ use rustorio::Tick;
 use crate::{
     Resources, StartingResources,
     machine::AdvancedTick,
-    scheduler::{WaiterQueue, WakeHandle},
+    scheduler::{CallBackQueue, WakeHandle},
 };
 
 /// Wrapper to restrict mutable access.
@@ -44,7 +44,7 @@ pub struct GameState {
     pub tick: RestrictMut<Tick>,
     last_reported_tick: u64,
     pub resources: Resources,
-    pub queue: WaiterQueue,
+    pub queue: CallBackQueue,
 }
 
 impl GameState {
@@ -77,6 +77,22 @@ impl GameState {
         self.report_loads();
     }
 
+    pub fn check_waiters(&mut self) {
+        let mut scale_ups = vec![];
+        for m in self.resources.iter_producers() {
+            m.update(&self.tick, &mut self.queue);
+            if let Some(f) = m.scale_up_if_needed() {
+                scale_ups.push(f);
+            }
+        }
+        for f in scale_ups {
+            f(self);
+        }
+        while let Some(f) = self.queue.next_callback() {
+            f(self);
+        }
+    }
+
     pub fn report_loads(&mut self) {
         // const REPORT_PERIOD: u64 = 5;
         const REPORT_PERIOD: u64 = 100;
@@ -105,7 +121,7 @@ impl GameState {
 
     pub fn complete<R: Any>(&mut self, h: WakeHandle<R>) -> R {
         loop {
-            if let Some(ret) = self.queue.get(h) {
+            if let Some(ret) = h.get() {
                 return ret;
             }
             self.tick_fwd();

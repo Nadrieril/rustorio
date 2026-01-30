@@ -1,251 +1,235 @@
-use indexmap::IndexMap;
-use std::{
-    any::Any,
-    collections::{HashMap, VecDeque},
-    marker::PhantomData,
-    ops::{ControlFlow, FromResidual, Try},
-};
+use std::{any::Any, cell::RefCell, collections::VecDeque, rc::Rc};
 
 use crate::*;
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct WakeHandleId(u32);
+pub struct Sink<T, S = CallBackQueue>(Box<dyn FnOnce(&mut S, T)>);
+pub type StateSink<T> = Sink<T, GameState>;
 
-#[derive(Debug)]
-pub struct WakeHandle<T> {
-    pub id: WakeHandleId,
-    phantom: PhantomData<T>,
-}
+impl<T: Any, S: Any> Sink<T, S> {
+    pub fn from_fn(f: impl FnOnce(&mut S, T) + 'static) -> Self {
+        Self(Box::new(f))
+    }
 
-impl<T> Clone for WakeHandle<T> {
-    fn clone(&self) -> Self {
-        *self
+    pub fn give(self, s: &mut S, x: T) {
+        (self.0)(s, x)
+    }
+    pub fn map<U: Any>(self, f: impl FnOnce(&mut S, U) -> T + 'static) -> Sink<U, S> {
+        Sink::from_fn(|s, u| {
+            let t = f(s, u);
+            self.give(s, t);
+        })
+    }
+    pub fn map_state<Q: Any>(self, f: impl FnOnce(&mut Q) -> &mut S + 'static) -> Sink<T, Q> {
+        Sink::from_fn(|s, x| {
+            self.give(f(s), x);
+        })
     }
 }
-impl<T> Copy for WakeHandle<T> {}
-
-pub enum Poll<T> {
-    /// Waiting for another waiter to complete; don't poll again until that other waiter is done.
-    WaitingFor(WakeHandleId),
-    /// This waiter is waiting for a resource; it will be updated directly by the resource
-    /// producer.
-    WaitingForResource,
-    /// The waiter is done.
-    Ready(T),
+impl<T: Any> Sink<T, CallBackQueue> {
+    pub fn with_gamestate(self) -> Sink<T, GameState> {
+        self.map_state::<GameState>(|s| &mut s.queue)
+    }
 }
 
-impl<T> FromResidual for Poll<T> {
-    fn from_residual(residual: <Self as Try>::Residual) -> Self {
-        match residual {
-            Poll::Ready(x) => x,
-            Poll::WaitingFor(h) => Poll::WaitingFor(h),
-            Poll::WaitingForResource => Poll::WaitingForResource,
+impl<A: Any, B: Any> Sink<(A, B)> {
+    pub fn split(self) -> (Sink<A>, Sink<B>) {
+        struct PairinatorInner<A, B> {
+            a: Option<A>,
+            b: Option<B>,
+            sink: Sink<(A, B)>,
         }
-    }
-}
-impl<T> Try for Poll<T> {
-    type Output = T;
-    type Residual = Poll<!>;
-    fn from_output(output: Self::Output) -> Self {
-        Poll::Ready(output)
-    }
-    fn branch(self) -> ControlFlow<Self::Residual, Self::Output> {
-        match self {
-            Poll::Ready(v) => ControlFlow::Continue(v),
-            Poll::WaitingFor(h) => ControlFlow::Break(Poll::WaitingFor(h)),
-            Poll::WaitingForResource => ControlFlow::Break(Poll::WaitingForResource),
-        }
-    }
-}
 
-pub trait Waiter {
-    type Output: Any;
-    fn poll(&mut self, state: &mut GameState) -> Poll<Self::Output>;
-}
-
-trait UntypedWaiter {
-    fn poll(&mut self, state: &mut GameState) -> Poll<Box<dyn Any>>;
-}
-
-struct Untype<W>(W);
-impl<W: Waiter> UntypedWaiter for Untype<W> {
-    fn poll(&mut self, state: &mut GameState) -> Poll<Box<dyn Any>> {
-        match self.0.poll(state) {
-            Poll::WaitingFor(h) => Poll::WaitingFor(h),
-            Poll::WaitingForResource => Poll::WaitingForResource,
-            Poll::Ready(val) => Poll::Ready(Box::new(val)),
-        }
-    }
-}
-
-struct WaiterState {
-    waiter: Box<dyn UntypedWaiter>,
-    /// Wake these other waiters up when done.
-    dependent: Vec<WakeHandleId>,
-}
-
-#[derive(Default)]
-pub struct WaiterQueue {
-    next_handle: WakeHandleId,
-    /// Waiters that should be polled.
-    waiters: IndexMap<WakeHandleId, WaiterState>,
-    /// Waiters waiting on some external event.
-    dormant_waiters: IndexMap<WakeHandleId, WaiterState>,
-    /// Return values of the waiters that have completed.
-    done: HashMap<WakeHandleId, Box<dyn Any>>,
-    /// Waiters in need of update, e.g. because the waiter they were waiting on got completed.
-    needs_update: VecDeque<WakeHandleId>,
-}
-
-impl WaiterQueue {
-    fn next_handle_id(&mut self) -> WakeHandleId {
-        let h = self.next_handle;
-        self.next_handle = WakeHandleId(h.0 + 1);
-        h
-    }
-    /// Enqueues a waiter and returns a handle to wait for it.
-    fn enqueue_waiter<W: Waiter + 'static>(&mut self, w: W) -> WakeHandle<W::Output> {
-        let h = self.next_handle_id();
-        self.waiters.insert(
-            h,
-            WaiterState {
-                waiter: Box::new(Untype(w)),
-                dependent: vec![],
-            },
-        );
-        WakeHandle {
-            id: h,
-            phantom: PhantomData,
-        }
-    }
-    /// Enqueues a fake waiter that's already done.
-    pub fn set_already_resolved_handle<T: Any>(&mut self, x: T) -> WakeHandle<T> {
-        let h = self.next_handle_id();
-        self.done.insert(h, Box::new(x));
-        WakeHandle {
-            id: h,
-            phantom: PhantomData,
-        }
-    }
-    /// Enqueues a fake waiter that's never done.
-    pub fn set_never_resolved_handle<T: Any>(&mut self) -> WakeHandle<T> {
-        struct W<T>(PhantomData<T>);
-        impl<T: Any> Waiter for W<T> {
-            type Output = T;
-            fn poll(&mut self, _state: &mut GameState) -> Poll<Self::Output> {
-                Poll::WaitingForResource
+        fn call_back_if_ready<A: Any, B: Any>(
+            rc: Rc<RefCell<PairinatorInner<A, B>>>,
+            q: &mut CallBackQueue,
+        ) {
+            if let Some(inner) = Rc::into_inner(rc) {
+                let inner = RefCell::into_inner(inner);
+                inner.sink.give(q, (inner.a.unwrap(), inner.b.unwrap()))
             }
         }
-        self.enqueue_waiter(W(PhantomData::<T>))
+        let rc = Rc::new(RefCell::new(PairinatorInner {
+            a: None,
+            b: None,
+            sink: self,
+        }));
+        let a_side = rc.clone();
+        let a = Sink::from_fn(|q, x| {
+            a_side.borrow_mut().a = Some(x);
+            call_back_if_ready(a_side, q);
+        });
+        let b_side = rc;
+        let b = Sink::from_fn(|q, x| {
+            b_side.borrow_mut().b = Some(x);
+            call_back_if_ready(b_side, q);
+        });
+        (a, b)
     }
-    /// Set the output of this waiter. Its waiting code will no longer be run.
-    pub fn set_output<T: Any>(&mut self, h: WakeHandle<T>, x: T) {
-        let w = self
-            .waiters
-            .swap_remove(&h.id)
-            .or_else(|| self.dormant_waiters.swap_remove(&h.id))
-            .unwrap();
-        self.needs_update.extend(w.dependent);
-        self.done.insert(h.id, Box::new(x));
+}
+
+impl<const N: usize, T: Any> Sink<[T; N]> {
+    pub fn split_n(self) -> [Sink<T>; N] {
+        let rc = Rc::new(RefCell::new((vec![], self)));
+        std::array::from_fn(|_| {
+            let rc = rc.clone();
+            Sink::from_fn(move |q, x| {
+                rc.borrow_mut().0.push(x);
+                if let Some(inner) = Rc::into_inner(rc) {
+                    let inner = RefCell::into_inner(inner);
+                    inner.1.give(q, inner.0.try_into().ok().unwrap())
+                }
+            })
+        })
     }
-    /// Gets the value returned by the waiter if it is done. This moves the value out.
-    pub fn get<T: Any>(&mut self, h: WakeHandle<T>) -> Option<T> {
-        Some(*self.done.remove(&h.id)?.downcast::<T>().unwrap())
+}
+
+impl<const COUNT: u32, R: ResourceType + Any> Sink<Bundle<R, COUNT>> {
+    pub fn split_resource<B: IsBundle<Resource = R> + Any>(
+        self,
+    ) -> [Sink<B>; (COUNT / B::AMOUNT) as usize]
+    where
+        [(); (COUNT / B::AMOUNT) as usize]:,
+    {
+        assert_eq!(COUNT % B::AMOUNT, 0);
+        let rc = Rc::new(RefCell::new((Resource::new_empty(), Some(self))));
+        std::array::from_fn(|_| {
+            let rc = rc.clone();
+            Sink::from_fn(move |q, b: B| {
+                let mut inner = rc.borrow_mut();
+                inner.0.add(b.to_resource());
+                if inner.0.amount() >= COUNT {
+                    inner.1.take().unwrap().give(q, inner.0.bundle().unwrap())
+                }
+            })
+        })
     }
-    /// Gets the value returned by the waiter if it is done. This does not move the value out.
-    pub fn get_ref<T: Any>(&mut self, h: WakeHandle<T>) -> Option<&T> {
-        Some(self.done.get(&h.id)?.downcast_ref::<T>().unwrap())
+}
+
+/// One end of a pipe. `make_pipe` produces a source and a sink. When the sink is fed a value, the
+/// source will make it available.
+pub struct Source<T, S = CallBackQueue>(Rc<RefCell<SourceInner<T, S>>>);
+struct SourceInner<T, S> {
+    sink: Option<Sink<T, S>>,
+    value: Option<T>,
+}
+
+impl<T: Any, S: Any> Source<T, S> {
+    /// Build a pipe. When the sink is fed a value, the source will make it available.
+    pub fn make_pipe() -> (Source<T, S>, Sink<T, S>) {
+        Self::flexible_pipe(|sink| sink)
     }
-    pub fn is_ready(&mut self, id: WakeHandleId) -> bool {
-        self.done.contains_key(&id)
+    /// Flexible pipe that allows mapping between state types. The sink returned by this only uses
+    /// the function provided if we can't resolve instantly, which makes it different from mapping
+    /// the sink returned by `make_pipe` or mapping the sink passed to `Source::set_sink`.
+    pub fn flexible_pipe<Q: Any>(
+        f: impl FnOnce(Sink<T, S>) -> Sink<T, Q> + 'static,
+    ) -> (Source<T, S>, Sink<T, Q>) {
+        let rc = Rc::new(RefCell::new(SourceInner {
+            sink: None,
+            value: None,
+        }));
+        let source = Source(rc.clone());
+        let sink = Sink::from_fn(move |s, x| {
+            let mut inner = rc.borrow_mut();
+            if inner.value.is_some() {
+                panic!()
+            }
+            if let Some(sink) = inner.sink.take() {
+                f(sink).give(s, x);
+            } else {
+                inner.value = Some(x);
+            }
+        });
+        (source, sink)
+    }
+    pub fn make_resolved(x: T) -> Source<T, S> {
+        let rc = Rc::new(RefCell::new(SourceInner {
+            sink: None,
+            value: Some(x),
+        }));
+        Source(rc)
+    }
+    // TODO: bad API
+    pub fn get(&self) -> Option<T> {
+        self.0.borrow_mut().value.take()
+    }
+    pub fn try_get(self) -> Result<T, Self> {
+        let opt_value = self.0.borrow_mut().value.take();
+        opt_value.ok_or(self)
+    }
+    pub fn set_sink(self, s: &mut S, sink: Sink<T, S>) {
+        let mut inner = self.0.borrow_mut();
+        if inner.sink.is_some() {
+            panic!()
+        }
+        if let Some(x) = inner.value.take() {
+            sink.give(s, x);
+        } else {
+            inner.sink = Some(sink);
+        }
+    }
+}
+impl<T: Any, S: Any> Source<Source<T, S>, S> {
+    pub fn flatten(self, s: &mut S) -> Source<T, S> {
+        let (source, sink) = Source::make_pipe();
+        self.set_sink(
+            s,
+            Sink::from_fn(|s, inner: Source<T, S>| {
+                inner.set_sink(s, sink);
+            }),
+        );
+        source
+    }
+}
+
+pub type WakeHandle<T> = Source<T, GameState>;
+
+#[derive(Default)]
+pub struct CallBackQueue {
+    /// Waiters in need of update, e.g. because the waiter they were waiting on got completed.
+    needs_call: VecDeque<Box<dyn FnOnce(&mut GameState)>>,
+}
+
+impl CallBackQueue {
+    /// A `WakeHandle` normally works with a `Sink<T, GameState>`. Our producers can't feed such a
+    /// sink though, because they're part of the game state and thus don't have a `&mut GameState`
+    /// around. To circumvent that, this makes a `Sink<T, CallBackQueue>` that adds the real sink
+    /// to a the callback queue to be resolved when the producer is done.
+    pub fn detached_pipe<T: Any>(&mut self) -> (WakeHandle<T>, Sink<T>) {
+        WakeHandle::flexible_pipe(|state_sink| {
+            Sink::from_fn(|q: &mut CallBackQueue, x| {
+                q.needs_call.push_back(Box::new(|state: &mut GameState| {
+                    state_sink.give(state, x);
+                }))
+            })
+        })
     }
 
-    /// Enqueue all the waiting waiters into the update queue. Get them one by one with
-    /// `next_waiter_to_update`. We can't poll them directly because we need full access to the
-    /// `GameState`.
-    pub fn enqueue_waiters_for_update(&mut self) {
-        self.needs_update.extend(self.waiters.keys().copied())
-    }
-    /// Get the next waiter to update from the update queue.
-    pub fn next_waiter_to_update(&mut self) -> Option<WakeHandleId> {
-        self.needs_update.pop_front()
+    /// Get the next callback to call from the callback queue.
+    pub fn next_callback(&mut self) -> Option<Box<dyn FnOnce(&mut GameState)>> {
+        self.needs_call.pop_front()
     }
 }
 
 impl GameState {
-    pub fn enqueue_waiter<W: Waiter + 'static>(&mut self, mut w: W) -> WakeHandle<W::Output> {
-        if let Poll::Ready(ret) = w.poll(self) {
-            self.nowait(ret)
-        } else {
-            self.queue.enqueue_waiter(w)
-        }
-    }
     pub fn nowait<T: Any>(&mut self, x: T) -> WakeHandle<T> {
-        self.queue.set_already_resolved_handle(x)
+        WakeHandle::make_resolved(x)
     }
     pub fn never<T: Any>(&mut self) -> WakeHandle<T> {
-        self.queue.set_never_resolved_handle()
+        self.handle_via_sink(|_, _sink| ())
     }
 
-    pub fn check_waiters(&mut self) {
-        let mut scale_ups = vec![];
-        for m in self.resources.iter_producers() {
-            m.update(&self.tick, &mut self.queue);
-            if let Some(f) = m.scale_up_if_needed() {
-                scale_ups.push(f);
-            }
-        }
-        for f in scale_ups {
-            f(self);
-        }
-        self.queue.enqueue_waiters_for_update();
-        while let Some(handle) = self.queue.next_waiter_to_update() {
-            self.check_waiter(handle);
-        }
+    pub fn handle_via_sink<T: Any>(
+        &mut self,
+        f: impl FnOnce(&mut GameState, Sink<T>),
+    ) -> WakeHandle<T> {
+        let (h, sink) = self.queue.detached_pipe();
+        f(self, sink);
+        h
     }
 
-    fn check_waiter(&mut self, handle: WakeHandleId) -> Option<()> {
-        let mut w = self
-            .queue
-            .waiters
-            .swap_remove(&handle)
-            .or_else(|| self.queue.dormant_waiters.swap_remove(&handle))?;
-        match w.waiter.poll(self) {
-            Poll::Ready(val) => {
-                self.queue.needs_update.extend(w.dependent);
-                self.queue.done.insert(handle, val);
-                return Some(());
-            }
-            Poll::WaitingFor(waiting_for) => {
-                if let Some(waiting_for) = self
-                    .queue
-                    .waiters
-                    .get_mut(&waiting_for)
-                    .or_else(|| self.queue.dormant_waiters.get_mut(&waiting_for))
-                {
-                    waiting_for.dependent.push(handle);
-                    self.queue.dormant_waiters.insert(handle, w);
-                } else {
-                    self.queue.waiters.insert(handle, w);
-                }
-            }
-            Poll::WaitingForResource => {
-                self.queue.dormant_waiters.insert(handle, w);
-            }
-        }
-        Some(())
-    }
-
-    /// Poll that waiter to get its value if it is ready.
-    fn poll_waiter<T: Any>(&mut self, handle: WakeHandle<T>) -> Poll<T> {
-        if let Some(v) = self.queue.get(handle) {
-            Poll::Ready(v)
-        } else {
-            Poll::WaitingFor(handle.id)
-        }
-    }
-    pub fn is_ready(&mut self, id: WakeHandleId) -> bool {
-        self.queue.is_ready(id)
+    pub fn map_to_sink<T: Any>(&mut self, h: WakeHandle<T>, sink: Sink<T>) {
+        h.set_sink(self, sink.with_gamestate());
     }
 
     pub fn map<T: Any, U: Any>(
@@ -253,74 +237,31 @@ impl GameState {
         h: WakeHandle<T>,
         f: impl FnOnce(&mut GameState, T) -> U + 'static,
     ) -> WakeHandle<U> {
-        struct W<F, T>(WakeHandle<T>, Option<F>);
-        impl<F, T: Any, U: Any> Waiter for W<F, T>
-        where
-            F: FnOnce(&mut GameState, T) -> U,
-        {
-            type Output = U;
-            fn poll(&mut self, state: &mut GameState) -> Poll<Self::Output> {
-                let v = state.poll_waiter(self.0)?;
-                let f = self.1.take().unwrap();
-                let v = f(state, v);
-                Poll::Ready(v)
-            }
-        }
-        self.enqueue_waiter(W(h, Some(f)))
+        self.handle_via_sink(|state, sink| {
+            h.set_sink(state, sink.with_gamestate().map(f));
+        })
     }
 
-    /// Schedules `f` to run after `h` completes, and returns a hendl to the final output.
+    /// Schedules `f` to run after `h` completes, and returns a handle to the final output.
     pub fn then<T: Any, U: Any>(
         &mut self,
         h: WakeHandle<T>,
         f: impl FnOnce(&mut GameState, T) -> WakeHandle<U> + 'static,
     ) -> WakeHandle<U> {
-        enum W<F, T, U> {
-            First(WakeHandle<T>, Option<F>),
-            Second(WakeHandle<U>),
-        }
-        impl<F, T: Any, U: Any> Waiter for W<F, T, U>
-        where
-            F: FnOnce(&mut GameState, T) -> WakeHandle<U>,
-        {
-            type Output = U;
-            fn poll(&mut self, state: &mut GameState) -> Poll<Self::Output> {
-                if let W::First(h, f) = self {
-                    let v = state.poll_waiter(*h)?;
-                    let f = f.take().unwrap();
-                    *self = W::Second(f(state, v));
-                }
-                let W::Second(h) = self else { unreachable!() };
-                let v = state.poll_waiter(*h)?;
-                Poll::Ready(v)
-            }
-        }
-        self.enqueue_waiter(W::First(h, Some(f)))
+        self.map(h, f).flatten(self)
     }
 
     /// Joins the results of two handles together.
     pub fn pair<T: Any, U: Any>(
         &mut self,
-        x: WakeHandle<T>,
-        y: WakeHandle<U>,
+        a: WakeHandle<T>,
+        b: WakeHandle<U>,
     ) -> WakeHandle<(T, U)> {
-        struct W<T, U>(WakeHandle<T>, WakeHandle<U>);
-        impl<T: Any, U: Any> Waiter for W<T, U> {
-            type Output = (T, U);
-            fn poll(&mut self, state: &mut GameState) -> Poll<Self::Output> {
-                let Self(x, y) = *self;
-                if let Some(id) = [x.id, y.id]
-                    .into_iter()
-                    .filter(|&h| !state.is_ready(h))
-                    .last()
-                {
-                    return Poll::WaitingFor(id);
-                }
-                let v = (state.queue.get(x).unwrap(), state.queue.get(y).unwrap());
-                Poll::Ready(v)
-            }
-        }
-        self.enqueue_waiter(W(x, y))
+        self.handle_via_sink(|state, sink| {
+            let (sink_a, sink_b) = sink.split();
+            state.map_to_sink(a, sink_a);
+            state.map_to_sink(b, sink_b);
+        })
     }
 
     pub fn triple<T: Any, U: Any, V: Any>(
@@ -335,61 +276,15 @@ impl GameState {
     }
 
     /// Joins the results of two handles together.
-    pub fn collect<T: Any>(&mut self, handles: Vec<WakeHandle<T>>) -> WakeHandle<Vec<T>> {
-        struct W<T>(Vec<WakeHandle<T>>);
-        impl<T: Any> Waiter for W<T> {
-            type Output = Vec<T>;
-            fn poll(&mut self, state: &mut GameState) -> Poll<Self::Output> {
-                if let Some(h) = self.0.iter().filter(|&&h| !state.is_ready(h.id)).last() {
-                    return Poll::WaitingFor(h.id);
-                }
-                let v = self
-                    .0
-                    .iter()
-                    .map(|h| state.queue.get(*h).unwrap())
-                    .collect();
-                Poll::Ready(v)
-            }
-        }
-        self.enqueue_waiter(W(handles))
-    }
-
-    /// Give input to the producer and wait for it to produce output.
-    pub fn feed_producer<P: Producer<Input: Makeable>>(
+    pub fn collect_n<const N: usize, T: Any>(
         &mut self,
-        p: Priority,
-    ) -> WakeHandle<P::Output> {
-        let inputs = self.make(p);
-        self.then(inputs, move |state, inputs| {
-            P::get_ref(&mut state.resources)
-                .producer
-                .add_inputs(&state.tick, inputs);
-            state.wait_for_producer_output::<P>(p)
-        })
-    }
-
-    /// Waits for the selected producer to produce a single output bundle.
-    /// This is the main wait point of our system.
-    fn wait_for_producer_output<P: Producer>(&mut self, p: Priority) -> WakeHandle<P::Output> {
-        struct W<P>(PhantomData<P>);
-        impl<P: Producer> Waiter for W<P> {
-            type Output = P::Output;
-            fn poll(&mut self, _state: &mut GameState) -> Poll<Self::Output> {
-                Poll::WaitingForResource
+        handles: [WakeHandle<T>; N],
+    ) -> WakeHandle<[T; N]> {
+        self.handle_via_sink(|state, sink| {
+            let sinks = sink.split_n();
+            for (sink, h) in sinks.into_iter().zip(handles) {
+                state.map_to_sink(h, sink);
             }
-        }
-        let h = self.queue.enqueue_waiter(W(PhantomData::<P>));
-        P::get_ref(&mut self.resources).enqueue(&self.tick, &mut self.queue, h, p);
-        h
-    }
-
-    pub fn collect_sum<R: ResourceType + Any, B: IsBundle<Resource = R> + Any>(
-        &mut self,
-        handles: Vec<WakeHandle<B>>,
-    ) -> WakeHandle<Resource<R>> {
-        let h = self.collect(handles);
-        self.map(h, |_state, bundles| {
-            bundles.into_iter().map(|b| b.to_resource()).sum()
         })
     }
 }

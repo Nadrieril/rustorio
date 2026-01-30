@@ -218,13 +218,26 @@ pub trait Producer: Any + Sized {
     /// Update the producer and yield an output if one is ready.
     fn poll(&mut self, tick: &Tick) -> Option<Self::Output>;
 
+    /// Turn a receiver of outputs into a receiver of inputs.
+    fn feed(p: Priority, sink: Sink<Self::Output>) -> StateSink<Self::Input> {
+        StateSink::from_fn(move |state, inputs| {
+            Self::get_ref(&mut state.resources).feed(
+                &state.tick,
+                &mut state.queue,
+                p,
+                inputs,
+                sink,
+            );
+        })
+    }
+
     /// Schedule the addition of a new producing entity of this type. This is called when the load
     /// becomes too high compared to the available parallelism.
     fn scale_up(&self, _p: Priority) -> Box<dyn FnOnce(&mut GameState) -> WakeHandle<()>> {
         Box::new(|state| state.never())
     }
     /// Trigger a scaling up. This ensures we don't scale up many times in parallel.
-    fn trigger_scale_up(p: Priority) -> Box<dyn FnOnce(&mut GameState) -> WakeHandle<()>> {
+    fn trigger_scale_up(p: Priority) -> Box<dyn FnOnce(&mut GameState)> {
         Box::new(move |state| {
             eprintln!("scaling up {}", type_name::<Self>());
             let this = Self::get_ref(&mut state.resources);
@@ -232,7 +245,7 @@ pub trait Producer: Any + Sized {
             let h = this.producer.scale_up(p)(state);
             state.map(h, |state, _| {
                 Self::get_ref(&mut state.resources).scaling_up -= 1;
-            })
+            });
         })
     }
 }
@@ -502,7 +515,7 @@ pub struct Priority(pub u16);
 pub struct ProducerWithQueue<P: Producer> {
     pub producer: P,
     /// Keep sorted by priority.
-    pub queue: VecDeque<(WakeHandle<P::Output>, Priority)>,
+    pub queue: VecDeque<(Sink<P::Output>, Priority)>,
     /// Number of producing entities we're in the process of building.
     pub scaling_up: u32,
 }
@@ -516,39 +529,49 @@ impl<P: Producer> ProducerWithQueue<P> {
         }
     }
 
-    pub fn enqueue(
+    fn enqueue(
         &mut self,
         tick: &Tick,
-        waiters: &mut WaiterQueue,
-        h: WakeHandle<P::Output>,
+        waiters: &mut CallBackQueue,
+        sink: Sink<P::Output>,
         p: Priority,
     ) {
         if self.queue.is_empty()
             && let Some(output) = self.producer.poll(tick)
         {
-            waiters.set_output(h, output);
+            sink.give(waiters, output);
         } else {
-            self.queue.push_back((h, p));
+            self.queue.push_back((sink, p));
             self.queue
                 .make_contiguous()
                 .sort_by_key(|(_, p)| Reverse(*p));
         }
     }
+    /// Feed the producer some inputs and somewhere to put the generated output.
+    pub fn feed(
+        &mut self,
+        tick: &Tick,
+        waiters: &mut CallBackQueue,
+        p: Priority,
+        inputs: P::Input,
+        sink: Sink<P::Output>,
+    ) {
+        self.producer.add_inputs(tick, inputs);
+        self.enqueue(tick, waiters, sink, p);
+    }
 
-    pub fn update(&mut self, tick: &Tick, waiters: &mut WaiterQueue) {
+    pub fn update(&mut self, tick: &Tick, waiters: &mut CallBackQueue) {
         while !self.queue.is_empty()
             && let Some(output) = self.producer.poll(tick)
         {
-            let (h, _) = self.queue.pop_front().unwrap();
-            waiters.set_output(h, output);
+            let (sink, _) = self.queue.pop_front().unwrap();
+            sink.give(waiters, output);
         }
     }
 
     /// Checks if scaling up may be needed. If so, return a function to be called on the game state
     /// to schedule a scale up.
-    pub fn scale_up_if_needed(
-        &mut self,
-    ) -> Option<Box<dyn FnOnce(&mut GameState) -> WakeHandle<()>>> {
+    pub fn scale_up_if_needed(&mut self) -> Option<Box<dyn FnOnce(&mut GameState)>> {
         if self.queue.len()
             > (self.producer.available_parallelism() + self.scaling_up * 12) as usize * 4
         {
@@ -577,11 +600,11 @@ impl<P: Producer> ProducerWithQueue<P> {
 
 impl GameState {
     /// Enqueue the creation of a new producing entity for this producer type.
-    pub fn scale_up<P: Producer>(&mut self, p: Priority) -> WakeHandle<()> {
+    pub fn scale_up<P: Producer>(&mut self, p: Priority) {
         <P>::trigger_scale_up(p)(self)
     }
 
-    pub fn add_miner<Ore: ResourceType + Any>(&mut self, p: Priority) -> WakeHandle<()>
+    pub fn add_miner<Ore: ResourceType + Any>(&mut self, p: Priority)
     where
         Miner: CostIn<Ore>,
     {
