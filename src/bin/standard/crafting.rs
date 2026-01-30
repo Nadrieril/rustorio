@@ -10,7 +10,7 @@ use rustorio::{
     },
     research::{PointsTechnology, RedScience, SteelTechnology},
     resources::{Copper, CopperOre, CopperWire, ElectronicCircuit, Iron, IronOre, Point, Steel},
-    territory::Territory,
+    territory::{Miner, Territory},
 };
 use rustorio_engine::research::TechRecipe;
 
@@ -208,9 +208,9 @@ impl Makeable for () {
         state.nowait(())
     }
 }
-impl<T: Makeable> Makeable for (T,) {
+impl<A: Makeable> Makeable for (A,) {
     fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
-        let h = T::make(state, p);
+        let h = A::make(state, p);
         state.map(h, |_, v| (v,))
     }
 }
@@ -238,7 +238,7 @@ impl<const N: usize, T: Makeable> Makeable for [T; N] {
 }
 
 /// Items that can be produced from a given makeable input.
-trait InputMakeable: Sized + Any {
+pub trait InputMakeable: Sized + Any {
     type Input: Makeable;
 
     fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
@@ -256,6 +256,13 @@ impl<R: InputMakeable> Makeable for R {
     }
 }
 
+impl InputMakeable for Miner {
+    type Input = (Bundle<Iron, 10>, Bundle<Copper, 5>);
+
+    fn make_from_input(_state: &mut GameState, (iron, copper): Self::Input) -> Self {
+        Miner::build(iron, copper)
+    }
+}
 impl<R> InputMakeable for Furnace<R>
 where
     R: FurnaceRecipe + Recipe + Makeable,
@@ -444,6 +451,68 @@ impl ConstMakeable for CopperWireRecipe {
 impl ConstMakeable for ElectronicCircuitRecipe {
     const MAKE: Self = ElectronicCircuitRecipe;
 }
+
+/// Compute the cost of a given item in terms of another one.
+pub trait CostIn<O> {
+    const COST: u32;
+}
+impl<O, T> CostIn<O> for T {
+    default const COST: u32 = <T as InputCost<O>>::COST + <T as SelfCost<O>>::COST;
+}
+impl<O> CostIn<O> for () {
+    const COST: u32 = 0;
+}
+impl<O, A: CostIn<O>> CostIn<O> for (A,) {
+    const COST: u32 = A::COST;
+}
+impl<O, A: CostIn<O>, B: CostIn<O>> CostIn<O> for (A, B) {
+    const COST: u32 = A::COST + B::COST;
+}
+impl<O, A: CostIn<O>, B: CostIn<O>, C: CostIn<O>> CostIn<O> for (A, B, C) {
+    const COST: u32 = A::COST + B::COST + C::COST;
+}
+impl<O, T: ConstMakeable> CostIn<O> for T {
+    const COST: u32 = 0;
+}
+impl<O, R: CostIn<O>, const N: usize> CostIn<O> for [R; N] {
+    const COST: u32 = N as u32 * R::COST;
+}
+
+trait SelfCost<A> {
+    const COST: u32;
+}
+impl<A, B> SelfCost<A> for B {
+    default const COST: u32 = 0;
+}
+impl<A> SelfCost<A> for A {
+    const COST: u32 = 1;
+}
+impl<A: ResourceType, const N: u32> SelfCost<A> for Bundle<A, N> {
+    const COST: u32 = N;
+}
+
+trait InputCost<A> {
+    const COST: u32;
+}
+impl<O, T> InputCost<O> for T {
+    default const COST: u32 = 0;
+}
+impl<O, T> InputCost<O> for T
+where
+    Self: InputMakeable<Input: CostIn<O>>,
+{
+    const COST: u32 = <<Self as InputMakeable>::Input as CostIn<O>>::COST;
+}
+
+const _: () = {
+    assert!(<IronOre as CostIn<IronOre>>::COST == 1);
+    assert!(<Bundle<Iron, 1> as InputCost<IronOre>>::COST == 1);
+    assert!(<Miner as CostIn<IronOre>>::COST == 10);
+    assert!(<Miner as CostIn<Bundle<IronOre, 1>>>::COST == 10);
+    assert!(<Miner as CostIn<CopperOre>>::COST == 5);
+    assert!(<Furnace<IronSmelting> as CostIn<IronOre>>::COST == 10);
+    assert!(<Iron as CostIn<Iron>>::COST == 1);
+};
 
 impl GameState {
     pub fn make<T: Makeable>(&mut self, p: Priority) -> WakeHandle<T> {

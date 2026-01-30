@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-#![feature(generic_const_exprs, try_trait_v2, never_type)]
+#![feature(generic_const_exprs, try_trait_v2, never_type, specialization)]
 #![allow(incomplete_features)]
 use std::{
     any::{Any, TypeId},
@@ -7,7 +7,7 @@ use std::{
     ops::ControlFlow,
 };
 
-use crafting::{ConstRecipe, Makeable};
+use crafting::{ConstRecipe, CostIn, Makeable};
 use indexmap::IndexMap;
 use rustorio::{
     self, Bundle, HandRecipe, Resource, ResourceType, Technology, Tick,
@@ -16,7 +16,7 @@ use rustorio::{
     recipes::{CopperSmelting, CopperWireRecipe, IronSmelting, RedScienceRecipe, SteelSmelting},
     research::SteelTechnology,
     resources::{CopperOre, IronOre, Point},
-    territory::Territory,
+    territory::{Miner, Territory},
 };
 
 mod scheduler;
@@ -132,10 +132,16 @@ impl Resources {
     pub fn machine<M: Machine + Makeable>(&mut self) -> &mut ProducerWithQueue<MultiMachine<M>> {
         self.or_insert_producer(|| MultiMachine::<M>::default())
     }
-    pub fn add_territory<O: ResourceType + Any>(&mut self, t: Territory<O>) {
+    pub fn add_territory<O: ResourceType + Any>(&mut self, t: Territory<O>)
+    where
+        Miner: CostIn<O>,
+    {
         self.insert_producer(t);
     }
-    pub fn territory<O: ResourceType + Any>(&mut self) -> &mut ProducerWithQueue<Territory<O>> {
+    pub fn territory<O: ResourceType + Any>(&mut self) -> &mut ProducerWithQueue<Territory<O>>
+    where
+        Miner: CostIn<O>,
+    {
         self.get_producer()
     }
     pub fn hand_crafter<R: HandRecipe + ConstRecipe>(
