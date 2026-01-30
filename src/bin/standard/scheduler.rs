@@ -1,3 +1,4 @@
+use indexmap::IndexMap;
 use std::{
     any::Any,
     collections::{HashMap, VecDeque},
@@ -5,14 +6,7 @@ use std::{
     ops::{ControlFlow, FromResidual, Try},
 };
 
-use indexmap::IndexMap;
-use rustorio::{Resource, ResourceType};
-
-use crate::{
-    GameState,
-    crafting::{IsBundle, Makeable},
-    machine::{Priority, Producer},
-};
+use crate::*;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WakeHandleId(u32);
