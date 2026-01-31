@@ -150,13 +150,12 @@ impl<T: Any, S: Any> Source<T, S> {
         }));
         Source(rc)
     }
-    // TODO: bad API
-    pub fn get(&self) -> Option<T> {
-        self.0.borrow_mut().value.take()
-    }
-    pub fn try_get(self) -> Result<T, Self> {
+    pub fn try_get(self) -> ControlFlow<T, Self> {
         let opt_value = self.0.borrow_mut().value.take();
-        opt_value.ok_or(self)
+        match opt_value {
+            Some(val) => ControlFlow::Break(val),
+            None => ControlFlow::Continue(self),
+        }
     }
     pub fn set_sink(self, s: &mut S, sink: Sink<T, S>) {
         let mut inner = self.0.borrow_mut();

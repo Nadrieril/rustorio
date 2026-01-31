@@ -1,5 +1,11 @@
 #![forbid(unsafe_code)]
-#![feature(generic_const_exprs, try_trait_v2, never_type, specialization)]
+#![feature(
+    generic_const_exprs,
+    never_type,
+    specialization,
+    try_blocks,
+    try_trait_v2
+)]
 #![allow(incomplete_features)]
 use indexmap::IndexMap;
 use std::{

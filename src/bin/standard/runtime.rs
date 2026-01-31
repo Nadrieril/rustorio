@@ -119,15 +119,16 @@ impl GameState {
         eprintln!("{}:\n{}", self.tick.as_ref(), loads);
     }
 
-    pub fn complete<R: Any>(&mut self, h: WakeHandle<R>) -> R {
-        loop {
-            if let Some(ret) = h.get() {
-                return ret;
+    pub fn complete<R: Any>(&mut self, mut h: WakeHandle<R>) -> R {
+        let ControlFlow::Break(ret) = try {
+            loop {
+                h = h.try_get()?;
+                self.tick_fwd();
+                if self.tick.cur() > 10000 {
+                    panic!("ticked too far?")
+                }
             }
-            self.tick_fwd();
-            if self.tick.cur() > 10000 {
-                panic!("ticked too far?")
-            }
-        }
+        };
+        ret
     }
 }
