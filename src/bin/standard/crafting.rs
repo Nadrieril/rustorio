@@ -21,42 +21,40 @@ impl<P: Producer<Output = (O,)>, O> SingleOutputProducer for P {
 }
 
 pub trait Makeable: Any + Sized {
-    fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self>;
-    fn make_then(state: &mut GameState, p: Priority, sink: StateSink<Self>) {
-        let o = Self::make(state, p);
-        o.set_sink(state, sink);
-    }
+    fn make_to(state: &mut GameState, p: Priority, sink: StateSink<Self>);
 }
 impl Makeable for () {
-    fn make(state: &mut GameState, _p: Priority) -> WakeHandle<Self> {
-        state.nowait(())
+    fn make_to(state: &mut GameState, _p: Priority, sink: StateSink<Self>) {
+        sink.give(state, ());
     }
 }
 impl<A: Makeable> Makeable for (A,) {
-    fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
-        let h = A::make(state, p);
-        state.map(h, |_, v| (v,))
+    fn make_to(state: &mut GameState, p: Priority, sink: StateSink<Self>) {
+        A::make_to(state, p, sink.map(|_, v| (v,)))
     }
 }
 impl<A: Makeable, B: Makeable> Makeable for (A, B) {
-    fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
-        let a = A::make(state, p);
-        let b = B::make(state, p);
-        state.pair(a, b)
+    fn make_to(state: &mut GameState, p: Priority, sink: StateSink<Self>) {
+        let (a, b) = sink.split();
+        A::make_to(state, p, a);
+        B::make_to(state, p, b);
     }
 }
 impl<A: Makeable, B: Makeable, C: Makeable> Makeable for (A, B, C) {
-    fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
-        let a = A::make(state, p);
-        let b = B::make(state, p);
-        let c = C::make(state, p);
-        state.triple(a, b, c)
+    fn make_to(state: &mut GameState, p: Priority, sink: StateSink<Self>) {
+        let sink = sink.map(|_, ((x, y), z)| (x, y, z));
+        let (ab, c) = sink.split();
+        let (a, b) = ab.split();
+        A::make_to(state, p, a);
+        B::make_to(state, p, b);
+        C::make_to(state, p, c);
     }
 }
 impl<const N: usize, T: Makeable> Makeable for [T; N] {
-    fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
-        let handles = std::array::from_fn(|_| T::make(state, p));
-        state.collect_n(handles)
+    fn make_to(state: &mut GameState, p: Priority, sink: StateSink<Self>) {
+        for sink in sink.split_n() {
+            T::make_to(state, p, sink);
+        }
     }
 }
 
@@ -64,18 +62,19 @@ impl<const N: usize, T: Makeable> Makeable for [T; N] {
 pub trait InputMakeable: Sized + Any {
     type Input: Makeable;
 
-    fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
-        let inputs = state.make(p);
-        state.map(inputs, move |state, inputs| {
-            Self::make_from_input(state, inputs)
-        })
+    fn make_to(state: &mut GameState, p: Priority, sink: StateSink<Self>) {
+        let sink = sink.map(Self::make_from_input);
+        // TODO: Weirdly enough, without the stateless indirection I get worse ticks due to the
+        // different (earlier?) scheduling.
+        let sink = state.make_stateless(sink).with_gamestate();
+        state.make_to(p, sink);
     }
 
     fn make_from_input(state: &mut GameState, input: Self::Input) -> Self;
 }
 impl<R: InputMakeable> Makeable for R {
-    fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
-        <Self as InputMakeable>::make(state, p)
+    fn make_to(state: &mut GameState, p: Priority, sink: StateSink<Self>) {
+        <Self as InputMakeable>::make_to(state, p, sink)
     }
 }
 
@@ -151,10 +150,10 @@ impl InputMakeable for TheFirstTime<SteelSmelting> {
     }
 }
 impl Makeable for SteelSmelting {
-    fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
+    fn make_to(state: &mut GameState, p: Priority, sink: StateSink<Self>) {
         // If we let scaling up happen automatically, we apparently lose ticks :(
         state.scale_up::<OnceMaker<Self>>(p);
-        state.produce::<OnceMaker<Self>>(p)
+        state.produce_to_state_sink::<OnceMaker<Self>>(p, sink);
     }
 }
 
@@ -168,10 +167,10 @@ impl InputMakeable for TheFirstTime<PointRecipe> {
     }
 }
 impl Makeable for PointRecipe {
-    fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
+    fn make_to(state: &mut GameState, p: Priority, sink: StateSink<Self>) {
         // If we let scaling up happen automatically, we apparently lose ticks :(
         state.scale_up::<OnceMaker<Self>>(p);
-        state.produce::<OnceMaker<Self>>(p)
+        state.produce_to_state_sink::<OnceMaker<Self>>(p, sink);
     }
 }
 
@@ -182,25 +181,18 @@ where
     type Input = [<R::Producer as Producer>::Input;
         (AMOUNT / <R::Producer as SingleOutputProducer>::Output::AMOUNT) as usize];
 
-    fn make(state: &mut GameState, p: Priority) -> WakeHandle<Self> {
+    fn make_to(state: &mut GameState, p: Priority, sink: StateSink<Self>) {
         if let Ok(x) = state.resources.resource().bundle() {
-            return state.nowait(x);
+            sink.give(state, x);
+            return;
         }
         // We cleverly don't fetch the whole input at once. Instead, as soon as the first input
         // bundle arrives we feed it to the producer.
-        // state.handle_via_sink(|state, sink| {
-        //     let sinks = sink.split_resource();
-        //     for sink in sinks {
-        //         state.feed_producer_then::<R::Producer>(
-        //             p,
-        //             sink.map::<<R::Producer as Producer>::Output>(|_, out| out.0),
-        //         );
-        //     }
-        // })
-        state.multiple(|state| {
-            let out = state.produce::<R::Producer>(p);
-            state.map(out, |_, out| out.0)
-        })
+        // Split the sink into individual chunks that match what the produces produces.
+        for sink in sink.split_resource() {
+            let sink = sink.map::<<R::Producer as Producer>::Output>(|_, out| out.0);
+            state.produce_to_state_sink::<R::Producer>(p, sink);
+        }
     }
 
     // We never call this because we don't want to fetch the whole input at once.
@@ -348,58 +340,34 @@ const _: () = {
 
 impl GameState {
     pub fn make<T: Makeable>(&mut self, p: Priority) -> WakeHandle<T> {
-        T::make(self, p)
+        let (h, sink) = WakeHandle::make_pipe();
+        self.make_to(p, sink);
+        h
     }
-    pub fn make_then<T: Makeable>(&mut self, p: Priority, sink: StateSink<T>) {
-        T::make_then(self, p, sink)
+    pub fn make_to<T: Makeable>(&mut self, p: Priority, sink: StateSink<T>) {
+        T::make_to(self, p, sink)
     }
 
     /// Give input to the producer and wait for it to produce output.
     /// This is the main wait point of our system.
-    pub fn produce<P: Producer<Input: Makeable>>(&mut self, p: Priority) -> WakeHandle<P::Output> {
-        self.handle_via_sink::<P::Output>(|state, sink| {
-            state.produce_to_sink::<P>(p, sink);
-        })
-    }
     pub fn produce_to_sink<P: Producer<Input: Makeable>>(
         &mut self,
         p: Priority,
         sink: Sink<P::Output>,
     ) {
-        self.make_then(p, P::feed(p, sink));
+        self.make_to(p, P::feed(p, sink));
     }
-
-    /// Given a producer of a single bundle of an item, make a producer of a larger bundle.
-    pub fn multiple<const COUNT: u32, R, B>(
+    pub fn produce_to_state_sink<P: Producer<Input: Makeable>>(
         &mut self,
-        f: impl Fn(&mut GameState) -> WakeHandle<B>,
-    ) -> WakeHandle<Bundle<R, COUNT>>
-    where
-        R: ResourceType + Any,
-        B: IsBundle<Resource = R> + Any,
-        [(); (COUNT / B::AMOUNT) as usize]:,
-    {
-        self.handle_via_sink(|state, sink| {
-            let sinks = sink.split_resource();
-            for sink in sinks {
-                let h = f(state);
-                state.map_to_sink(h, sink);
-            }
+        p: Priority,
+        sink: StateSink<P::Output>,
+    ) {
+        // Does the conversion between sink types via the `CallBackQueue`.
+        // TODO: Can't use `make_stateless` because that subtly changes the scheduling and
+        // regresses our time.
+        self.handle_via_sink::<<P as Producer>::Output>(|state, sink| {
+            state.produce_to_sink::<P>(p, sink);
         })
-    }
-    /// Given a producer of a single bundle of an item, make a producer of a larger bundle.
-    pub fn multiple_then<const COUNT: u32, R, B>(
-        &mut self,
-        f: impl Fn(&mut GameState, Sink<B>),
-        sink: Sink<Bundle<R, COUNT>>,
-    ) where
-        R: ResourceType + Any,
-        B: IsBundle<Resource = R> + Any,
-        [(); (COUNT / B::AMOUNT) as usize]:,
-    {
-        let sinks = sink.split_resource();
-        for sink in sinks {
-            f(self, sink)
-        }
+        .set_sink(self, sink);
     }
 }

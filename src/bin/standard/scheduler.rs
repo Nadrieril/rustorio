@@ -31,17 +31,17 @@ impl<T: Any> Sink<T, CallBackQueue> {
     }
 }
 
-impl<A: Any, B: Any> Sink<(A, B)> {
-    pub fn split(self) -> (Sink<A>, Sink<B>) {
-        struct PairinatorInner<A, B> {
+impl<A: Any, B: Any, S: Any> Sink<(A, B), S> {
+    pub fn split(self) -> (Sink<A, S>, Sink<B, S>) {
+        struct PairinatorInner<A, B, S> {
             a: Option<A>,
             b: Option<B>,
-            sink: Sink<(A, B)>,
+            sink: Sink<(A, B), S>,
         }
 
-        fn call_back_if_ready<A: Any, B: Any>(
-            rc: Rc<RefCell<PairinatorInner<A, B>>>,
-            q: &mut CallBackQueue,
+        fn call_back_if_ready<A: Any, B: Any, S: Any>(
+            rc: Rc<RefCell<PairinatorInner<A, B, S>>>,
+            q: &mut S,
         ) {
             if let Some(inner) = Rc::into_inner(rc) {
                 let inner = RefCell::into_inner(inner);
@@ -67,8 +67,8 @@ impl<A: Any, B: Any> Sink<(A, B)> {
     }
 }
 
-impl<const N: usize, T: Any> Sink<[T; N]> {
-    pub fn split_n(self) -> [Sink<T>; N] {
+impl<const N: usize, T: Any, S: Any> Sink<[T; N], S> {
+    pub fn split_n(self) -> [Sink<T, S>; N] {
         let rc = Rc::new(RefCell::new((vec![], self)));
         std::array::from_fn(|_| {
             let rc = rc.clone();
@@ -83,10 +83,10 @@ impl<const N: usize, T: Any> Sink<[T; N]> {
     }
 }
 
-impl<const COUNT: u32, R: ResourceType + Any> Sink<Bundle<R, COUNT>> {
+impl<const COUNT: u32, R: ResourceType + Any, S: Any> Sink<Bundle<R, COUNT>, S> {
     pub fn split_resource<B: IsBundle<Resource = R> + Any>(
         self,
-    ) -> [Sink<B>; (COUNT / B::AMOUNT) as usize]
+    ) -> [Sink<B, S>; (COUNT / B::AMOUNT) as usize]
     where
         [(); (COUNT / B::AMOUNT) as usize]:,
     {
@@ -121,6 +121,7 @@ impl<T: Any, S: Any> Source<T, S> {
     /// Flexible pipe that allows mapping between state types. The sink returned by this only uses
     /// the function provided if we can't resolve instantly, which makes it different from mapping
     /// the sink returned by `make_pipe` or mapping the sink passed to `Source::set_sink`.
+    // TODO: make scheduling better so that direct mapping doesn't regress out time.
     pub fn flexible_pipe<Q: Any>(
         f: impl FnOnce(Sink<T, S>) -> Sink<T, Q> + 'static,
     ) -> (Source<T, S>, Sink<T, Q>) {
@@ -195,7 +196,7 @@ impl CallBackQueue {
     /// sink though, because they're part of the game state and thus don't have a `&mut GameState`
     /// around. To circumvent that, this makes a `Sink<T, CallBackQueue>` that adds the real sink
     /// to a the callback queue to be resolved when the producer is done.
-    pub fn detached_pipe<T: Any>(&mut self) -> (WakeHandle<T>, Sink<T>) {
+    pub fn stateless_pipe<T: Any>(&mut self) -> (WakeHandle<T>, Sink<T>) {
         WakeHandle::flexible_pipe(|state_sink| {
             Sink::from_fn(|q: &mut CallBackQueue, x| {
                 q.needs_call.push_back(Box::new(|state: &mut GameState| {
@@ -223,9 +224,15 @@ impl GameState {
         &mut self,
         f: impl FnOnce(&mut GameState, Sink<T>),
     ) -> WakeHandle<T> {
-        let (h, sink) = self.queue.detached_pipe();
+        let (h, sink) = self.queue.stateless_pipe();
         f(self, sink);
         h
+    }
+
+    pub fn make_stateless<T: Any>(&mut self, state_sink: StateSink<T>) -> Sink<T> {
+        let (h, sink) = self.queue.stateless_pipe();
+        h.set_sink(self, state_sink);
+        sink
     }
 
     pub fn map_to_sink<T: Any>(&mut self, h: WakeHandle<T>, sink: Sink<T>) {

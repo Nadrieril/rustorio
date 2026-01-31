@@ -233,8 +233,8 @@ pub trait Producer: Any + Sized {
 
     /// Schedule the addition of a new producing entity of this type. This is called when the load
     /// becomes too high compared to the available parallelism.
-    fn scale_up(&self, _p: Priority) -> Box<dyn FnOnce(&mut GameState) -> WakeHandle<()>> {
-        Box::new(|state| state.never())
+    fn scale_up(&self, _p: Priority, _done: StateSink<()>) -> StateSink<()> {
+        StateSink::from_fn(|_state, ()| ())
     }
     /// Trigger a scaling up. This ensures we don't scale up many times in parallel.
     fn trigger_scale_up(p: Priority) -> Box<dyn FnOnce(&mut GameState)> {
@@ -242,10 +242,10 @@ pub trait Producer: Any + Sized {
             eprintln!("scaling up {}", type_name::<Self>());
             let this = Self::get_ref(&mut state.resources);
             this.scaling_up += 1;
-            let h = this.producer.scale_up(p)(state);
-            state.map(h, |state, _| {
+            let when_done = StateSink::from_fn(|state, ()| {
                 Self::get_ref(&mut state.resources).scaling_up -= 1;
             });
+            this.producer.scale_up(p, when_done).give(state, ());
         })
     }
 }
@@ -298,21 +298,19 @@ where
         self.resources(tick).bundle().ok().map(|x| (x,))
     }
 
-    fn scale_up(&self, p: Priority) -> Box<dyn FnOnce(&mut GameState) -> WakeHandle<()>> {
+    fn scale_up(&self, p: Priority, done: StateSink<()>) -> StateSink<()> {
         let num_miners = self.num_miners();
         let max_miners = self.max_miners();
-        Box::new(move |state| {
+        StateSink::from_fn(move |state, ()| {
             let this = Self::get_ref(&mut state.resources);
             if num_miners + this.scaling_up <= max_miners {
-                let miner = state.make(p);
-                state.map(miner, move |state, miner| {
+                let add_miner = done.map(|state, miner: Miner| {
                     Self::get_ref(&mut state.resources)
                         .producer
                         .add_miner(&state.tick, miner)
                         .unwrap();
-                })
-            } else {
-                state.never()
+                });
+                state.make_to(p, add_miner);
             }
         })
     }
@@ -357,12 +355,12 @@ where
         self.poll(tick)
     }
 
-    fn scale_up(&self, p: Priority) -> Box<dyn FnOnce(&mut GameState) -> WakeHandle<()>> {
-        Box::new(move |state| {
-            let machine = state.make(p);
-            state.map(machine, move |state, machine: M| {
+    fn scale_up(&self, p: Priority, done: StateSink<()>) -> StateSink<()> {
+        StateSink::from_fn(move |state, ()| {
+            let add_machine = done.map(|state, machine: M| {
                 state.resources.machine().producer.add(&state.tick, machine);
-            })
+            });
+            state.make_to(p, add_machine);
         })
     }
 }
@@ -441,24 +439,6 @@ pub struct OnceMaker<O> {
     is_started: bool,
     output: Option<O>,
 }
-impl<O> OnceMaker<O> {
-    pub fn ensure_made(state: &mut GameState, p: Priority) -> WakeHandle<()>
-    where
-        O: Clone,
-        TheFirstTime<O>: Makeable,
-    {
-        let this = &mut Self::get_ref(&mut state.resources).producer;
-        if !this.is_started {
-            this.is_started = true;
-            let first_time = state.make(p);
-            state.map(first_time, |state, TheFirstTime(o)| {
-                Self::get_ref(&mut state.resources).producer.output = Some(o);
-            })
-        } else {
-            state.nowait(())
-        }
-    }
-}
 impl<O> Default for OnceMaker<O> {
     fn default() -> Self {
         Self {
@@ -492,17 +472,17 @@ where
         self.output.clone()
     }
 
-    fn scale_up(&self, p: Priority) -> Box<dyn FnOnce(&mut GameState) -> WakeHandle<()>> {
-        Box::new(move |state| {
+    fn scale_up(&self, p: Priority, done: StateSink<()>) -> StateSink<()> {
+        StateSink::from_fn(move |state, ()| {
             let this = &mut Self::get_ref(&mut state.resources).producer;
             if !this.is_started {
                 this.is_started = true;
-                let first_time = state.make(p);
-                state.map(first_time, |state, TheFirstTime(o)| {
+                let produce = done.map(|state, TheFirstTime(o)| {
                     Self::get_ref(&mut state.resources).producer.output = Some(o);
-                })
+                });
+                state.make_to(p, produce);
             } else {
-                state.nowait(())
+                done.give(state, ());
             }
         })
     }
@@ -612,9 +592,16 @@ impl GameState {
     }
 
     pub fn add_machine<M: Machine + Makeable>(&mut self, p: Priority) -> WakeHandle<()> {
-        // self.scale_up::<MultiMachine<M>>(p)
-        // If we use `trigger_scale_up` then we lose some parallelism :(
-        <MultiMachine<M>>::scale_up(&self.resources.machine().producer, p)(&mut *self)
+        self.handle_via_sink(|state, sink| {
+            // self.scale_up::<MultiMachine<M>>(p)
+            // TODO: If we use `trigger_scale_up` then we lose some parallelism :(
+            state
+                .resources
+                .machine::<M>()
+                .producer
+                .scale_up(p, sink.with_gamestate())
+                .give(state, ())
+        })
     }
     pub fn add_assembler<R>(&mut self, p: Priority) -> WakeHandle<()>
     where
