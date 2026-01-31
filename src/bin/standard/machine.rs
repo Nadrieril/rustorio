@@ -115,7 +115,7 @@ impl<M: Machine> MultiMachine<M> {
             MultiMachine::Present(items) => {
                 // Get inputs from the other machines to average out the load.
                 let total_load: u32 = items.iter_mut().map(|m| m.input_load(tick)).sum();
-                let average_load: u32 = total_load / ((items.len() + 1) as u32);
+                let average_load: u32 = total_load.div_ceil((items.len() + 1) as u32);
                 for n in items.iter_mut() {
                     while n.input_load(tick) > average_load
                         && let Some(input) = n.pop_inputs(tick)

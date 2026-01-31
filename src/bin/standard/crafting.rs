@@ -144,6 +144,7 @@ impl InputMakeable for TheFirstTime<SteelSmelting> {
         let lab = pqw
             .producer
             .take_map(|lab| lab.change_technology(&points_tech).unwrap());
+        println!("changing the labs to `PointsTechnology`");
         *state.resources.machine() = ProducerWithQueue::new(lab);
         *state.resources.tech() = Some(points_tech);
         TheFirstTime(steel_smelting)
