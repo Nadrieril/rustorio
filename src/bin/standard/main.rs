@@ -47,7 +47,7 @@ type StartingResources = <GameMode as rustorio::GameMode>::StartingResources;
 
 pub struct Victory(<GameMode as rustorio::GameMode>::VictoryResources);
 
-impl InputMakeable for Victory {
+impl SingleMakeable for Victory {
     type Input = <GameMode as rustorio::GameMode>::VictoryResources;
     fn make_from_input(_state: &mut GameState, input: Self::Input) -> Self {
         Victory(input)

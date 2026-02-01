@@ -30,7 +30,7 @@ impl<O, T: ConstMakeable> CostIn<O> for T {
 impl<O, R: CostIn<O>, const N: usize> CostIn<O> for [R; N] {
     const COST: u32 = N as u32 * R::COST;
 }
-impl<O, R: CostIn<O> + ProducerMakeable, const N: u32> CostIn<O> for Bundle<R, N> {
+impl<O, R: CostIn<O> + BundleMakeable, const N: u32> CostIn<O> for Bundle<R, N> {
     const COST: u32 = N * R::COST;
 }
 
@@ -55,9 +55,9 @@ impl<O, T> InputCost<O> for T {
 }
 impl<O, T> InputCost<O> for T
 where
-    Self: InputMakeable<Input: CostIn<O>>,
+    Self: SingleMakeable<Input: CostIn<O>>,
 {
-    const COST: u32 = <<Self as InputMakeable>::Input as CostIn<O>>::COST;
+    const COST: u32 = <<Self as SingleMakeable>::Input as CostIn<O>>::COST;
 }
 
 const _: () = {
@@ -70,6 +70,7 @@ const _: () = {
     // assert!(<Iron as CostIn<Iron>>::COST == 1);
 };
 
+/// Resource dependency graph.
 #[derive(Default)]
 pub struct ResourceGraph {
     name_map: HashMap<GraphNode, String>,

@@ -1,4 +1,4 @@
-use std::{any::Any, marker::PhantomData};
+use std::any::Any;
 
 use crate::*;
 
@@ -11,16 +11,7 @@ impl<M: Machine<Recipe: ConstRecipe<BundledOutputs = (O,)>>, O> SingleOutputMach
     type Output = O;
 }
 
-pub trait SingleOutputProducer:
-    Producer<Output = (<Self as SingleOutputProducer>::Output,)>
-{
-    type Output;
-}
-impl<P: Producer<Output = (O,)>, O> SingleOutputProducer for P {
-    type Output = O;
-}
-
-/// Set of resources that can be automatically crated.
+/// Set of resources that can be automatically crafted.
 pub trait Makeable: Any + Sized {
     fn make_to(state: &mut GameState, p: Priority, sink: StateSink<Self>);
 
@@ -100,156 +91,8 @@ impl<const N: usize, T: Makeable> Makeable for [T; N] {
         T::add_edge_to_graph(graph, start, weight * N as f32);
     }
 }
-impl<R: InputMakeable> Makeable for R {
-    fn make_to(state: &mut GameState, p: Priority, sink: StateSink<Self>) {
-        <Self as InputMakeable>::make_to(state, p, sink)
-    }
 
-    fn add_nodes_to_graph(graph: &mut ResourceGraph) {
-        <Self as InputMakeable>::add_node_to_graph(graph);
-    }
-    fn add_edge_to_graph(graph: &mut ResourceGraph, start: GraphNode, weight: f32) {
-        <Self as InputMakeable>::add_edge_to_graph(graph, start, weight);
-    }
-}
-
-/// Items that can be automatically crafted.
-pub trait InputMakeable: Sized + Any {
-    type Input: Makeable;
-
-    fn make_to(state: &mut GameState, p: Priority, sink: StateSink<Self>) {
-        let sink = sink.map(Self::make_from_input);
-        // TODO: Weirdly enough, without the stateless indirection I get worse ticks due to the
-        // different (earlier?) scheduling.
-        let sink = state.make_stateless(sink).with_gamestate();
-        state.make_to(p, sink);
-    }
-
-    fn make_from_input(state: &mut GameState, input: Self::Input) -> Self;
-
-    /// Record this resource in the global resource graph.
-    fn add_node_to_graph(graph: &mut ResourceGraph) {
-        if let Some(id) = graph.add_node::<Self>() {
-            Self::Input::add_edge_to_graph(graph, id, 1f32);
-        }
-    }
-    /// Record an edge to this resource in the global resource graph.
-    fn add_edge_to_graph(graph: &mut ResourceGraph, start: GraphNode, weight: f32) {
-        Self::add_node_to_graph(graph);
-        graph.add_edge_to::<Self>(start, weight);
-    }
-}
-
-impl InputMakeable for Miner {
-    type Input = (Bundle<Iron, 10>, Bundle<Copper, 5>);
-
-    fn make_from_input(_state: &mut GameState, (iron, copper): Self::Input) -> Self {
-        Miner::build(iron, copper)
-    }
-}
-impl<R> InputMakeable for Furnace<R>
-where
-    R: FurnaceRecipe + Recipe + Makeable,
-{
-    type Input = (R, Bundle<Iron, 10>);
-
-    fn make_from_input(state: &mut GameState, (r, iron): Self::Input) -> Self {
-        Furnace::build(&state.tick, r, iron)
-    }
-}
-impl<R> InputMakeable for Assembler<R>
-where
-    R: AssemblerRecipe + Recipe + Makeable,
-{
-    type Input = (R, Bundle<Iron, 6>, Bundle<CopperWire, 12>);
-
-    fn make_from_input(state: &mut GameState, (r, iron, copper_wire): Self::Input) -> Self {
-        Assembler::build(&state.tick, r, copper_wire, iron)
-    }
-}
-impl<T: Technology> InputMakeable for Lab<T>
-where
-    TechAvailable<T>: Makeable,
-{
-    type Input = (Bundle<Iron, 20>, Bundle<Copper, 15>, TechAvailable<T>);
-
-    fn make_from_input(state: &mut GameState, (iron, copper, _): Self::Input) -> Self {
-        let tech = state.resources.tech().as_ref().unwrap();
-        Lab::build(&state.tick, tech, iron, copper)
-    }
-}
-
-pub struct TechAvailable<T: Technology>(PhantomData<T>);
-
-impl InputMakeable for TechAvailable<SteelTechnology> {
-    type Input = ();
-    fn make_from_input(_state: &mut GameState, _input: Self::Input) -> Self {
-        Self(PhantomData)
-    }
-}
-impl InputMakeable for TechAvailable<PointsTechnology> {
-    // The steel smelting recipe is because it also sets up the points tech.
-    type Input = SteelSmelting;
-    fn make_from_input(_state: &mut GameState, _input: Self::Input) -> Self {
-        Self(PhantomData)
-    }
-}
-
-impl InputMakeable for TheFirstTime<SteelSmelting> {
-    type Input = Bundle<ResearchPoint<SteelTechnology>, 20>;
-
-    fn make_from_input(state: &mut GameState, research_points: Self::Input) -> Self {
-        let steel_tech: SteelTechnology = state.resources.tech().take().unwrap();
-        let (steel_smelting, points_tech) = steel_tech.research(research_points);
-        let pqw = state.resources.machine::<Lab<SteelTechnology>>();
-        assert_eq!(pqw.queue.len(), 0);
-        let lab = pqw
-            .producer
-            .take_map(|lab| lab.change_technology(&points_tech).unwrap());
-        println!("changing the labs to `PointsTechnology`");
-        *state.resources.machine() = ProducerWithQueue::new(lab);
-        *state.resources.tech() = Some(points_tech);
-        TheFirstTime(steel_smelting)
-    }
-}
-impl InputMakeable for SteelSmelting {
-    type Input = ();
-
-    fn make_to(state: &mut GameState, p: Priority, sink: StateSink<Self>) {
-        // If we let scaling up happen automatically, we apparently lose ticks :(
-        state.scale_up::<OnceMaker<Self>>(p);
-        state.produce_to_state_sink::<OnceMaker<Self>>(p, sink);
-    }
-
-    fn make_from_input(_state: &mut GameState, _input: Self::Input) -> Self {
-        unreachable!()
-    }
-}
-
-impl InputMakeable for TheFirstTime<PointRecipe> {
-    type Input = Bundle<ResearchPoint<PointsTechnology>, 50>;
-
-    fn make_from_input(state: &mut GameState, research_points: Self::Input) -> Self {
-        let points_tech: PointsTechnology = state.resources.tech().take().unwrap();
-        let points_recipe = points_tech.research(research_points);
-        TheFirstTime(points_recipe)
-    }
-}
-impl InputMakeable for PointRecipe {
-    type Input = ();
-
-    fn make_to(state: &mut GameState, p: Priority, sink: StateSink<Self>) {
-        // If we let scaling up happen automatically, we apparently lose ticks :(
-        state.scale_up::<OnceMaker<Self>>(p);
-        state.produce_to_state_sink::<OnceMaker<Self>>(p, sink);
-    }
-
-    fn make_from_input(_state: &mut GameState, _input: Self::Input) -> Self {
-        unreachable!()
-    }
-}
-
-impl<const AMOUNT: u32, R: ProducerMakeable> Makeable for Bundle<R, AMOUNT>
+impl<const AMOUNT: u32, R: BundleMakeable> Makeable for Bundle<R, AMOUNT>
 where
     [(); (AMOUNT / <R::Producer as SingleOutputProducer>::Output::AMOUNT) as usize]:,
 {
@@ -268,99 +111,276 @@ where
     }
 
     fn add_nodes_to_graph(graph: &mut ResourceGraph) {
-        <R as ProducerMakeable>::add_node_to_graph(graph);
+        <R as BundleMakeable>::add_node_to_graph(graph);
     }
     fn add_edge_to_graph(graph: &mut ResourceGraph, start: GraphNode, weight: f32) {
-        <R as ProducerMakeable>::add_edge_to_graph(graph, start, weight * AMOUNT as f32);
+        <R as BundleMakeable>::add_edge_to_graph(graph, start, weight * AMOUNT as f32);
     }
 }
 
-/// Items that can be produced by producers. This is the heart of the crafting logic.
-/// This maker fetches the required inputs, gives them to the producer, then waits for the producer
-/// to produce its output.
-pub trait ProducerMakeable: ResourceType + Sized + Any {
-    type Producer: SingleOutputProducer<Input: Makeable, Output: IsBundle<Resource = Self>>;
+pub use bundle_makeable::*;
+mod bundle_makeable {
+    use crate::*;
 
-    /// Record this resource in the global resource graph.
-    fn add_node_to_graph(graph: &mut ResourceGraph) {
-        if let Some(id) = graph.add_node::<Self>() {
-            let weight = 1f32 / <Self::Producer as SingleOutputProducer>::Output::AMOUNT as f32;
-            <<Self::Producer as Producer>::Input as Makeable>::add_edge_to_graph(graph, id, weight);
+    pub trait SingleOutputProducer:
+        Producer<Output = (<Self as SingleOutputProducer>::Output,)>
+    {
+        type Output;
+    }
+    impl<P: Producer<Output = (O,)>, O> SingleOutputProducer for P {
+        type Output = O;
+    }
+
+    /// Items that can be produced by whole bundle amounts. This is the heart of the crafting logic.
+    /// This maker fetches the required inputs, gives them to the producer, then waits for the producer
+    /// to produce its output.
+    pub trait BundleMakeable: ResourceType + Sized + Any {
+        type Producer: SingleOutputProducer<Input: Makeable, Output: IsBundle<Resource = Self>>;
+
+        /// Record this resource in the global resource graph.
+        fn add_node_to_graph(graph: &mut ResourceGraph) {
+            if let Some(id) = graph.add_node::<Self>() {
+                let weight = 1f32 / <Self::Producer as SingleOutputProducer>::Output::AMOUNT as f32;
+                <<Self::Producer as Producer>::Input as Makeable>::add_edge_to_graph(
+                    graph, id, weight,
+                );
+            }
+        }
+        /// Record an edge to this resource in the global resource graph.
+        fn add_edge_to_graph(graph: &mut ResourceGraph, start: GraphNode, weight: f32) {
+            Self::add_node_to_graph(graph);
+            graph.add_edge_to::<Self>(start, weight);
         }
     }
-    /// Record an edge to this resource in the global resource graph.
+
+    impl BundleMakeable for IronOre {
+        type Producer = Territory<Self>;
+    }
+    impl BundleMakeable for CopperOre {
+        type Producer = Territory<Self>;
+    }
+    impl BundleMakeable for RedScience {
+        type Producer = HandCrafter<RedScienceRecipe>;
+    }
+    impl<R: MachineMakeable> BundleMakeable for R {
+        type Producer = MultiMachine<R::Machine>;
+    }
+
+    pub trait MachineMakeable: ResourceType + Any + Sized {
+        type Machine: Machine<Recipe: ConstRecipe<BundledInputs: Makeable>>
+            + SingleOutputMachine<Output: IsBundle<Resource = Self>>
+            + Makeable;
+    }
+
+    impl MachineMakeable for Iron {
+        type Machine = Furnace<IronSmelting>;
+    }
+    impl MachineMakeable for Copper {
+        type Machine = Furnace<CopperSmelting>;
+    }
+    impl MachineMakeable for Steel {
+        type Machine = Furnace<SteelSmelting>;
+    }
+    impl MachineMakeable for CopperWire {
+        type Machine = Assembler<CopperWireRecipe>;
+    }
+    impl MachineMakeable for ElectronicCircuit {
+        type Machine = Assembler<ElectronicCircuitRecipe>;
+    }
+    impl MachineMakeable for Point {
+        type Machine = Assembler<PointRecipe>;
+    }
+    impl<T: Technology + Any> MachineMakeable for ResearchPoint<T>
+    where
+        TechRecipe<T>: ConstRecipe<BundledInputs: Makeable, BundledOutputs = (Bundle<Self, 1>,)>,
+        Lab<T>: Makeable,
+    {
+        type Machine = Lab<T>;
+    }
+}
+
+impl<R: SingleMakeable> Makeable for R {
+    fn make_to(state: &mut GameState, p: Priority, sink: StateSink<Self>) {
+        <Self as SingleMakeable>::make_to(state, p, sink)
+    }
+
+    fn add_nodes_to_graph(graph: &mut ResourceGraph) {
+        <Self as SingleMakeable>::add_node_to_graph(graph);
+    }
     fn add_edge_to_graph(graph: &mut ResourceGraph, start: GraphNode, weight: f32) {
-        Self::add_node_to_graph(graph);
-        graph.add_edge_to::<Self>(start, weight);
+        <Self as SingleMakeable>::add_edge_to_graph(graph, start, weight);
     }
 }
 
-impl ProducerMakeable for IronOre {
-    type Producer = Territory<Self>;
-}
-impl ProducerMakeable for CopperOre {
-    type Producer = Territory<Self>;
-}
-impl ProducerMakeable for RedScience {
-    type Producer = HandCrafter<RedScienceRecipe>;
-}
-impl<R: MachineMakeable> ProducerMakeable for R {
-    type Producer = MultiMachine<R::Machine>;
-}
+pub use single_makeable::*;
+mod single_makeable {
+    use crate::*;
+    use std::marker::PhantomData;
 
-pub trait MachineMakeable: ResourceType + Any + Sized {
-    type Machine: Machine<Recipe: ConstRecipe<BundledInputs: Makeable>>
-        + SingleOutputMachine<Output: IsBundle<Resource = Self>>
-        + Makeable;
-}
+    /// Items that can be automatically crafted.
+    pub trait SingleMakeable: Sized + Any {
+        type Input: Makeable;
 
-impl MachineMakeable for Iron {
-    type Machine = Furnace<IronSmelting>;
-}
-impl MachineMakeable for Copper {
-    type Machine = Furnace<CopperSmelting>;
-}
-impl MachineMakeable for Steel {
-    type Machine = Furnace<SteelSmelting>;
-}
-impl MachineMakeable for CopperWire {
-    type Machine = Assembler<CopperWireRecipe>;
-}
-impl MachineMakeable for ElectronicCircuit {
-    type Machine = Assembler<ElectronicCircuitRecipe>;
-}
-impl MachineMakeable for Point {
-    type Machine = Assembler<PointRecipe>;
-}
-impl<T: Technology + Any> MachineMakeable for ResearchPoint<T>
-where
-    TechRecipe<T>: ConstRecipe<BundledInputs: Makeable, BundledOutputs = (Bundle<Self, 1>,)>,
-    Lab<T>: Makeable,
-{
-    type Machine = Lab<T>;
-}
+        fn make_to(state: &mut GameState, p: Priority, sink: StateSink<Self>) {
+            let sink = sink.map(Self::make_from_input);
+            // TODO: Weirdly enough, without the stateless indirection I get worse ticks due to the
+            // different (earlier?) scheduling.
+            let sink = state.make_stateless(sink).with_gamestate();
+            state.make_to(p, sink);
+        }
 
-pub trait ConstMakeable {
-    const MAKE: Self;
-}
-impl<T: ConstMakeable + Any> InputMakeable for T {
-    type Input = ();
-    fn make_from_input(_state: &mut GameState, _: ()) -> Self {
-        Self::MAKE
+        fn make_from_input(state: &mut GameState, input: Self::Input) -> Self;
+
+        /// Record this resource in the global resource graph.
+        fn add_node_to_graph(graph: &mut ResourceGraph) {
+            if let Some(id) = graph.add_node::<Self>() {
+                Self::Input::add_edge_to_graph(graph, id, 1f32);
+            }
+        }
+        /// Record an edge to this resource in the global resource graph.
+        fn add_edge_to_graph(graph: &mut ResourceGraph, start: GraphNode, weight: f32) {
+            Self::add_node_to_graph(graph);
+            graph.add_edge_to::<Self>(start, weight);
+        }
     }
-}
 
-impl ConstMakeable for IronSmelting {
-    const MAKE: Self = IronSmelting;
-}
-impl ConstMakeable for CopperSmelting {
-    const MAKE: Self = CopperSmelting;
-}
-impl ConstMakeable for CopperWireRecipe {
-    const MAKE: Self = CopperWireRecipe;
-}
-impl ConstMakeable for ElectronicCircuitRecipe {
-    const MAKE: Self = ElectronicCircuitRecipe;
+    impl SingleMakeable for Miner {
+        type Input = (Bundle<Iron, 10>, Bundle<Copper, 5>);
+
+        fn make_from_input(_state: &mut GameState, (iron, copper): Self::Input) -> Self {
+            Miner::build(iron, copper)
+        }
+    }
+    impl<R> SingleMakeable for Furnace<R>
+    where
+        R: FurnaceRecipe + Recipe + Makeable,
+    {
+        type Input = (R, Bundle<Iron, 10>);
+
+        fn make_from_input(state: &mut GameState, (r, iron): Self::Input) -> Self {
+            Furnace::build(&state.tick, r, iron)
+        }
+    }
+    impl<R> SingleMakeable for Assembler<R>
+    where
+        R: AssemblerRecipe + Recipe + Makeable,
+    {
+        type Input = (R, Bundle<Iron, 6>, Bundle<CopperWire, 12>);
+
+        fn make_from_input(state: &mut GameState, (r, iron, copper_wire): Self::Input) -> Self {
+            Assembler::build(&state.tick, r, copper_wire, iron)
+        }
+    }
+    impl<T: Technology> SingleMakeable for Lab<T>
+    where
+        TechAvailable<T>: Makeable,
+    {
+        type Input = (Bundle<Iron, 20>, Bundle<Copper, 15>, TechAvailable<T>);
+
+        fn make_from_input(state: &mut GameState, (iron, copper, _): Self::Input) -> Self {
+            let tech = state.resources.tech().as_ref().unwrap();
+            Lab::build(&state.tick, tech, iron, copper)
+        }
+    }
+
+    pub struct TechAvailable<T: Technology>(PhantomData<T>);
+
+    impl SingleMakeable for TechAvailable<SteelTechnology> {
+        type Input = ();
+        fn make_from_input(_state: &mut GameState, _input: Self::Input) -> Self {
+            Self(PhantomData)
+        }
+    }
+    impl SingleMakeable for TechAvailable<PointsTechnology> {
+        // The steel smelting recipe is because it also sets up the points tech.
+        type Input = SteelSmelting;
+        fn make_from_input(_state: &mut GameState, _input: Self::Input) -> Self {
+            Self(PhantomData)
+        }
+    }
+
+    impl SingleMakeable for TheFirstTime<SteelSmelting> {
+        type Input = Bundle<ResearchPoint<SteelTechnology>, 20>;
+
+        fn make_from_input(state: &mut GameState, research_points: Self::Input) -> Self {
+            let steel_tech: SteelTechnology = state.resources.tech().take().unwrap();
+            let (steel_smelting, points_tech) = steel_tech.research(research_points);
+            let pqw = state.resources.machine::<Lab<SteelTechnology>>();
+            assert_eq!(pqw.queue.len(), 0);
+            let lab = pqw
+                .producer
+                .take_map(|lab| lab.change_technology(&points_tech).unwrap());
+            println!("changing the labs to `PointsTechnology`");
+            *state.resources.machine() = ProducerWithQueue::new(lab);
+            *state.resources.tech() = Some(points_tech);
+            TheFirstTime(steel_smelting)
+        }
+    }
+    impl SingleMakeable for SteelSmelting {
+        type Input = ();
+
+        fn make_to(state: &mut GameState, p: Priority, sink: StateSink<Self>) {
+            // If we let scaling up happen automatically, we apparently lose ticks :(
+            state.scale_up::<OnceMaker<Self>>(p);
+            state.produce_to_state_sink::<OnceMaker<Self>>(p, sink);
+        }
+
+        fn make_from_input(_state: &mut GameState, _input: Self::Input) -> Self {
+            unreachable!()
+        }
+    }
+
+    impl SingleMakeable for TheFirstTime<PointRecipe> {
+        type Input = Bundle<ResearchPoint<PointsTechnology>, 50>;
+
+        fn make_from_input(state: &mut GameState, research_points: Self::Input) -> Self {
+            let points_tech: PointsTechnology = state.resources.tech().take().unwrap();
+            let points_recipe = points_tech.research(research_points);
+            TheFirstTime(points_recipe)
+        }
+    }
+    impl SingleMakeable for PointRecipe {
+        type Input = ();
+
+        fn make_to(state: &mut GameState, p: Priority, sink: StateSink<Self>) {
+            // If we let scaling up happen automatically, we apparently lose ticks :(
+            state.scale_up::<OnceMaker<Self>>(p);
+            state.produce_to_state_sink::<OnceMaker<Self>>(p, sink);
+        }
+
+        fn make_from_input(_state: &mut GameState, _input: Self::Input) -> Self {
+            unreachable!()
+        }
+    }
+
+    impl<T: ConstMakeable + Any> SingleMakeable for T {
+        type Input = ();
+        fn make_from_input(_state: &mut GameState, _: ()) -> Self {
+            Self::MAKE
+        }
+    }
+
+    pub use const_makeable::ConstMakeable;
+    mod const_makeable {
+        use crate::*;
+
+        pub trait ConstMakeable {
+            const MAKE: Self;
+        }
+
+        impl ConstMakeable for IronSmelting {
+            const MAKE: Self = IronSmelting;
+        }
+        impl ConstMakeable for CopperSmelting {
+            const MAKE: Self = CopperSmelting;
+        }
+        impl ConstMakeable for CopperWireRecipe {
+            const MAKE: Self = CopperWireRecipe;
+        }
+        impl ConstMakeable for ElectronicCircuitRecipe {
+            const MAKE: Self = ElectronicCircuitRecipe;
+        }
+    }
 }
 
 impl GameState {
