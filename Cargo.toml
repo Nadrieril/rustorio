@@ -6,5 +6,6 @@ edition = "2024"
 [dependencies]
 indexmap = "2.13.0"
 itertools = "0.14.0"
+petgraph = "0.8.3"
 rustorio = { git = "https://github.com/albertsgarde/rustorio", default-features = false }
 rustorio-engine = { git = "https://github.com/albertsgarde/rustorio", default-features = false }

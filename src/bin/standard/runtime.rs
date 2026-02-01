@@ -7,7 +7,7 @@ use itertools::Itertools;
 use rustorio::Tick;
 
 use crate::{
-    Resources, StartingResources,
+    ResourceGraph, Resources, StartingResources,
     machine::AdvancedTick,
     scheduler::{CallBackQueue, WakeHandle},
 };
@@ -45,6 +45,7 @@ pub struct GameState {
     last_reported_tick: u64,
     pub resources: Resources,
     pub queue: CallBackQueue,
+    pub graph: ResourceGraph,
 }
 
 impl GameState {
@@ -55,6 +56,7 @@ impl GameState {
             last_reported_tick: 0,
             queue: Default::default(),
             resources: Resources::new(starting_resources),
+            graph: Default::default(),
         }
     }
 

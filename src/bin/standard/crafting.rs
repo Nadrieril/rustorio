@@ -20,17 +20,33 @@ impl<P: Producer<Output = (O,)>, O> SingleOutputProducer for P {
     type Output = O;
 }
 
+/// Set of resources that can be automatically crated.
 pub trait Makeable: Any + Sized {
     fn make_to(state: &mut GameState, p: Priority, sink: StateSink<Self>);
+
+    /// Record these resources in the global resource graph.
+    fn add_nodes_to_graph(graph: &mut ResourceGraph);
+    /// Record an edge to these resources in the global resource graph.
+    fn add_edge_to_graph(graph: &mut ResourceGraph, start: GraphNode, weight: f32);
 }
 impl Makeable for () {
     fn make_to(state: &mut GameState, _p: Priority, sink: StateSink<Self>) {
         sink.give(state, ());
     }
+
+    fn add_nodes_to_graph(_graph: &mut ResourceGraph) {}
+    fn add_edge_to_graph(_graph: &mut ResourceGraph, _start: GraphNode, _weight: f32) {}
 }
 impl<A: Makeable> Makeable for (A,) {
     fn make_to(state: &mut GameState, p: Priority, sink: StateSink<Self>) {
         A::make_to(state, p, sink.map(|_, v| (v,)))
+    }
+
+    fn add_nodes_to_graph(graph: &mut ResourceGraph) {
+        A::add_nodes_to_graph(graph);
+    }
+    fn add_edge_to_graph(graph: &mut ResourceGraph, start: GraphNode, weight: f32) {
+        A::add_edge_to_graph(graph, start, weight);
     }
 }
 impl<A: Makeable, B: Makeable> Makeable for (A, B) {
@@ -38,6 +54,15 @@ impl<A: Makeable, B: Makeable> Makeable for (A, B) {
         let (a, b) = sink.split();
         A::make_to(state, p, a);
         B::make_to(state, p, b);
+    }
+
+    fn add_nodes_to_graph(graph: &mut ResourceGraph) {
+        A::add_nodes_to_graph(graph);
+        B::add_nodes_to_graph(graph);
+    }
+    fn add_edge_to_graph(graph: &mut ResourceGraph, start: GraphNode, weight: f32) {
+        A::add_edge_to_graph(graph, start, weight);
+        B::add_edge_to_graph(graph, start, weight);
     }
 }
 impl<A: Makeable, B: Makeable, C: Makeable> Makeable for (A, B, C) {
@@ -49,6 +74,17 @@ impl<A: Makeable, B: Makeable, C: Makeable> Makeable for (A, B, C) {
         B::make_to(state, p, b);
         C::make_to(state, p, c);
     }
+
+    fn add_nodes_to_graph(graph: &mut ResourceGraph) {
+        A::add_nodes_to_graph(graph);
+        B::add_nodes_to_graph(graph);
+        C::add_nodes_to_graph(graph);
+    }
+    fn add_edge_to_graph(graph: &mut ResourceGraph, start: GraphNode, weight: f32) {
+        A::add_edge_to_graph(graph, start, weight);
+        B::add_edge_to_graph(graph, start, weight);
+        C::add_edge_to_graph(graph, start, weight);
+    }
 }
 impl<const N: usize, T: Makeable> Makeable for [T; N] {
     fn make_to(state: &mut GameState, p: Priority, sink: StateSink<Self>) {
@@ -56,9 +92,28 @@ impl<const N: usize, T: Makeable> Makeable for [T; N] {
             T::make_to(state, p, sink);
         }
     }
+
+    fn add_nodes_to_graph(graph: &mut ResourceGraph) {
+        T::add_nodes_to_graph(graph);
+    }
+    fn add_edge_to_graph(graph: &mut ResourceGraph, start: GraphNode, weight: f32) {
+        T::add_edge_to_graph(graph, start, weight * N as f32);
+    }
+}
+impl<R: InputMakeable> Makeable for R {
+    fn make_to(state: &mut GameState, p: Priority, sink: StateSink<Self>) {
+        <Self as InputMakeable>::make_to(state, p, sink)
+    }
+
+    fn add_nodes_to_graph(graph: &mut ResourceGraph) {
+        <Self as InputMakeable>::add_node_to_graph(graph);
+    }
+    fn add_edge_to_graph(graph: &mut ResourceGraph, start: GraphNode, weight: f32) {
+        <Self as InputMakeable>::add_edge_to_graph(graph, start, weight);
+    }
 }
 
-/// Items that can be produced from a given makeable input.
+/// Items that can be automatically crafted.
 pub trait InputMakeable: Sized + Any {
     type Input: Makeable;
 
@@ -71,10 +126,17 @@ pub trait InputMakeable: Sized + Any {
     }
 
     fn make_from_input(state: &mut GameState, input: Self::Input) -> Self;
-}
-impl<R: InputMakeable> Makeable for R {
-    fn make_to(state: &mut GameState, p: Priority, sink: StateSink<Self>) {
-        <Self as InputMakeable>::make_to(state, p, sink)
+
+    /// Record this resource in the global resource graph.
+    fn add_node_to_graph(graph: &mut ResourceGraph) {
+        if let Some(id) = graph.add_node::<Self>() {
+            Self::Input::add_edge_to_graph(graph, id, 1f32);
+        }
+    }
+    /// Record an edge to this resource in the global resource graph.
+    fn add_edge_to_graph(graph: &mut ResourceGraph, start: GraphNode, weight: f32) {
+        Self::add_node_to_graph(graph);
+        graph.add_edge_to::<Self>(start, weight);
     }
 }
 
@@ -150,11 +212,17 @@ impl InputMakeable for TheFirstTime<SteelSmelting> {
         TheFirstTime(steel_smelting)
     }
 }
-impl Makeable for SteelSmelting {
+impl InputMakeable for SteelSmelting {
+    type Input = ();
+
     fn make_to(state: &mut GameState, p: Priority, sink: StateSink<Self>) {
         // If we let scaling up happen automatically, we apparently lose ticks :(
         state.scale_up::<OnceMaker<Self>>(p);
         state.produce_to_state_sink::<OnceMaker<Self>>(p, sink);
+    }
+
+    fn make_from_input(_state: &mut GameState, _input: Self::Input) -> Self {
+        unreachable!()
     }
 }
 
@@ -167,21 +235,24 @@ impl InputMakeable for TheFirstTime<PointRecipe> {
         TheFirstTime(points_recipe)
     }
 }
-impl Makeable for PointRecipe {
+impl InputMakeable for PointRecipe {
+    type Input = ();
+
     fn make_to(state: &mut GameState, p: Priority, sink: StateSink<Self>) {
         // If we let scaling up happen automatically, we apparently lose ticks :(
         state.scale_up::<OnceMaker<Self>>(p);
         state.produce_to_state_sink::<OnceMaker<Self>>(p, sink);
     }
+
+    fn make_from_input(_state: &mut GameState, _input: Self::Input) -> Self {
+        unreachable!()
+    }
 }
 
-impl<const AMOUNT: u32, R: ProducerMakeable> InputMakeable for Bundle<R, AMOUNT>
+impl<const AMOUNT: u32, R: ProducerMakeable> Makeable for Bundle<R, AMOUNT>
 where
     [(); (AMOUNT / <R::Producer as SingleOutputProducer>::Output::AMOUNT) as usize]:,
 {
-    type Input = [<R::Producer as Producer>::Input;
-        (AMOUNT / <R::Producer as SingleOutputProducer>::Output::AMOUNT) as usize];
-
     fn make_to(state: &mut GameState, p: Priority, sink: StateSink<Self>) {
         if let Ok(x) = state.resources.resource().bundle() {
             sink.give(state, x);
@@ -196,9 +267,11 @@ where
         }
     }
 
-    // We never call this because we don't want to fetch the whole input at once.
-    fn make_from_input(_state: &mut GameState, _input: Self::Input) -> Self {
-        unreachable!()
+    fn add_nodes_to_graph(graph: &mut ResourceGraph) {
+        <R as ProducerMakeable>::add_node_to_graph(graph);
+    }
+    fn add_edge_to_graph(graph: &mut ResourceGraph, start: GraphNode, weight: f32) {
+        <R as ProducerMakeable>::add_edge_to_graph(graph, start, weight * AMOUNT as f32);
     }
 }
 
@@ -207,6 +280,19 @@ where
 /// to produce its output.
 pub trait ProducerMakeable: ResourceType + Sized + Any {
     type Producer: SingleOutputProducer<Input: Makeable, Output: IsBundle<Resource = Self>>;
+
+    /// Record this resource in the global resource graph.
+    fn add_node_to_graph(graph: &mut ResourceGraph) {
+        if let Some(id) = graph.add_node::<Self>() {
+            let weight = 1f32 / <Self::Producer as SingleOutputProducer>::Output::AMOUNT as f32;
+            <<Self::Producer as Producer>::Input as Makeable>::add_edge_to_graph(graph, id, weight);
+        }
+    }
+    /// Record an edge to this resource in the global resource graph.
+    fn add_edge_to_graph(graph: &mut ResourceGraph, start: GraphNode, weight: f32) {
+        Self::add_node_to_graph(graph);
+        graph.add_edge_to::<Self>(start, weight);
+    }
 }
 
 impl ProducerMakeable for IronOre {
@@ -254,7 +340,7 @@ where
     type Machine = Lab<T>;
 }
 
-trait ConstMakeable {
+pub trait ConstMakeable {
     const MAKE: Self;
 }
 impl<T: ConstMakeable + Any> InputMakeable for T {
@@ -277,68 +363,6 @@ impl ConstMakeable for ElectronicCircuitRecipe {
     const MAKE: Self = ElectronicCircuitRecipe;
 }
 
-/// Compute the cost of a given item in terms of another one.
-pub trait CostIn<O> {
-    const COST: u32;
-}
-impl<O, T> CostIn<O> for T {
-    default const COST: u32 = <T as InputCost<O>>::COST + <T as SelfCost<O>>::COST;
-}
-impl<O> CostIn<O> for () {
-    const COST: u32 = 0;
-}
-impl<O, A: CostIn<O>> CostIn<O> for (A,) {
-    const COST: u32 = A::COST;
-}
-impl<O, A: CostIn<O>, B: CostIn<O>> CostIn<O> for (A, B) {
-    const COST: u32 = A::COST + B::COST;
-}
-impl<O, A: CostIn<O>, B: CostIn<O>, C: CostIn<O>> CostIn<O> for (A, B, C) {
-    const COST: u32 = A::COST + B::COST + C::COST;
-}
-impl<O, T: ConstMakeable> CostIn<O> for T {
-    const COST: u32 = 0;
-}
-impl<O, R: CostIn<O>, const N: usize> CostIn<O> for [R; N] {
-    const COST: u32 = N as u32 * R::COST;
-}
-
-trait SelfCost<A> {
-    const COST: u32;
-}
-impl<A, B> SelfCost<A> for B {
-    default const COST: u32 = 0;
-}
-impl<A> SelfCost<A> for A {
-    const COST: u32 = 1;
-}
-impl<A: ResourceType, const N: u32> SelfCost<A> for Bundle<A, N> {
-    const COST: u32 = N;
-}
-
-trait InputCost<A> {
-    const COST: u32;
-}
-impl<O, T> InputCost<O> for T {
-    default const COST: u32 = 0;
-}
-impl<O, T> InputCost<O> for T
-where
-    Self: InputMakeable<Input: CostIn<O>>,
-{
-    const COST: u32 = <<Self as InputMakeable>::Input as CostIn<O>>::COST;
-}
-
-const _: () = {
-    assert!(<IronOre as CostIn<IronOre>>::COST == 1);
-    assert!(<Bundle<Iron, 1> as InputCost<IronOre>>::COST == 1);
-    assert!(<Miner as CostIn<IronOre>>::COST == 10);
-    assert!(<Miner as CostIn<Bundle<IronOre, 1>>>::COST == 10);
-    assert!(<Miner as CostIn<CopperOre>>::COST == 5);
-    assert!(<Furnace<IronSmelting> as CostIn<IronOre>>::COST == 10);
-    assert!(<Iron as CostIn<Iron>>::COST == 1);
-};
-
 impl GameState {
     pub fn make<T: Makeable>(&mut self, p: Priority) -> WakeHandle<T> {
         let (h, sink) = WakeHandle::make_pipe();
@@ -346,6 +370,7 @@ impl GameState {
         h
     }
     pub fn make_to<T: Makeable>(&mut self, p: Priority, sink: StateSink<T>) {
+        T::add_nodes_to_graph(&mut self.graph);
         T::make_to(self, p, sink)
     }
 

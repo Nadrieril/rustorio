@@ -28,11 +28,13 @@ pub use rustorio::{
 };
 pub use rustorio_engine::research::TechRecipe;
 
+mod analysis;
 mod crafting;
 mod machine;
 mod recipes;
 mod runtime;
 mod scheduler;
+pub use analysis::*;
 pub use crafting::*;
 pub use machine::*;
 pub use recipes::*;
@@ -43,9 +45,22 @@ type GameMode = Standard;
 
 type StartingResources = <GameMode as rustorio::GameMode>::StartingResources;
 
+pub struct Victory(<GameMode as rustorio::GameMode>::VictoryResources);
+
+impl InputMakeable for Victory {
+    type Input = <GameMode as rustorio::GameMode>::VictoryResources;
+    fn make_from_input(_state: &mut GameState, input: Self::Input) -> Self {
+        Victory(input)
+    }
+}
+
 fn main() {
-    fn user_main(tick: Tick, starting_resources: StartingResources) -> (Tick, Bundle<Point, 200>) {
-        GameState::new(tick, starting_resources).play()
+    fn user_main(
+        tick: Tick,
+        starting_resources: StartingResources,
+    ) -> (Tick, <GameMode as rustorio::GameMode>::VictoryResources) {
+        let (tick, v) = GameState::new(tick, starting_resources).play();
+        (tick, v.0)
     }
     rustorio::play::<GameMode>(user_main);
 }
@@ -199,7 +214,7 @@ impl Resources {
 }
 
 impl GameState {
-    fn play(mut self) -> (Tick, Bundle<Point, 200>) {
+    fn play(mut self) -> (Tick, Victory) {
         let p = Priority(4);
         // Start with this one otherwise we're stuck.
         self.scale_up::<MultiMachine<Furnace<IronSmelting>>>(p);
@@ -236,10 +251,12 @@ impl GameState {
         self.add_furnace::<SteelSmelting>(p);
         // self.add_furnace::<SteelSmelting>(p);
 
-        let points = self.make(Priority(0));
+        let victory = self.make(Priority(0));
 
-        let points: Bundle<Point, 200> = self.complete(points);
+        let victory: Victory = self.complete(victory);
 
-        (self.tick.into_inner(), points)
+        println!("{}", self.graph);
+
+        (self.tick.into_inner(), victory)
     }
 }
