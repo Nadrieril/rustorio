@@ -430,30 +430,48 @@ where
     }
 }
 
+/// Token that indicates that the given reusable resource is available.
+pub struct Available<T: Reusable>(PhantomData<T>);
+
+impl<T: Reusable> Copy for Available<T> {}
+impl<T: Reusable> Clone for Available<T> {
+    fn clone(&self) -> Self {
+        Self(PhantomData)
+    }
+}
+
+/// Items that can be made use of many times (e.g. recipes).
+#[marker]
+pub trait Reusable {}
+
+impl<T: Technology> Reusable for T {}
+impl<T: Recipe> Reusable for T {}
+
 /// Wrapper for resources that we only need to make once. The first time we query the resource will
 /// trigger the making of this, and subsequent times will reuse the already-produced resource.
-pub struct TheFirstTime<R>(pub R);
+pub struct TheFirstTime<T: Reusable>(pub T);
 
 /// Producer that represents items that are produced only once.
-pub struct OnceMaker<O> {
+pub struct OnceMaker<O: Reusable> {
     is_started: bool,
-    output: Option<O>,
+    available: Option<Available<O>>,
 }
-impl<O> Default for OnceMaker<O> {
+impl<O: Reusable> Default for OnceMaker<O> {
     fn default() -> Self {
         Self {
             is_started: false,
-            output: None,
+            available: None,
         }
     }
 }
 
 impl<O: Clone + Any> Producer for OnceMaker<O>
 where
+    O: Reusable,
     TheFirstTime<O>: Makeable,
 {
     type Input = ();
-    type Output = O;
+    type Output = Available<O>;
     fn name() -> String {
         type_name::<Self>()
     }
@@ -461,7 +479,7 @@ where
         resources.once_maker()
     }
     fn available_parallelism(&self) -> u32 {
-        self.output.is_some() as u32
+        self.available.is_some() as u32
     }
     fn self_cost(&self) -> u32 {
         0
@@ -469,7 +487,7 @@ where
 
     fn add_inputs(&mut self, _tick: &Tick, _inputs: Self::Input) {}
     fn poll(&mut self, _tick: &Tick) -> Option<Self::Output> {
-        self.output.clone()
+        self.available.clone()
     }
 
     fn scale_up(&self, p: Priority, done: StateSink<()>) -> StateSink<()> {
@@ -478,13 +496,40 @@ where
             if !this.is_started {
                 this.is_started = true;
                 let produce = done.map(|state, TheFirstTime(o)| {
-                    Self::get_ref(&mut state.resources).producer.output = Some(o);
+                    let available = state.resources.reusable().set(o);
+                    Self::get_ref(&mut state.resources).producer.available = Some(available);
                 });
                 state.make_to(p, produce);
             } else {
                 done.give(state, ());
             }
         })
+    }
+}
+
+/// A container for a reusable resource. The `Available` token serves as access to the contained
+/// data.
+pub struct ReusableContainer<T> {
+    /// The reusable value, once we've built it.
+    val: Option<T>,
+}
+
+impl<T: Reusable> ReusableContainer<T> {
+    pub fn empty() -> Self {
+        Self { val: None }
+    }
+    pub fn available(&self) -> Option<Available<T>> {
+        self.val.as_ref().map(|_| Available(PhantomData))
+    }
+    pub fn get(&self, _: Available<T>) -> &T {
+        self.val.as_ref().unwrap()
+    }
+    pub fn take(&mut self, _: Available<T>) -> T {
+        self.val.take().unwrap()
+    }
+    pub fn set(&mut self, t: T) -> Available<T> {
+        self.val = Some(t);
+        Available(PhantomData)
     }
 }
 

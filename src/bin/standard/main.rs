@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 #![feature(
     generic_const_exprs,
+    marker_trait_attr,
     never_type,
     specialization,
     try_blocks,
@@ -116,8 +117,6 @@ impl<P: HandProducer> ErasedHandProducer for ProducerWithQueue<P> {
     }
 }
 
-pub struct TechAvailable<T: Technology>(PhantomData<T>);
-
 impl Resources {
     fn or_insert_any<X: Any>(&mut self, f: impl FnOnce() -> X) -> &mut X {
         let storage: &mut (dyn Any + 'static) = self
@@ -156,24 +155,8 @@ impl Resources {
     pub fn resource<R: ResourceType + Any>(&mut self) -> &mut Resource<R> {
         self.or_insert_any(|| Resource::<R>::new_empty())
     }
-
-    fn tech_mut<T: Technology + Any>(&mut self) -> &mut Option<T> {
-        self.or_insert_any(|| None)
-    }
-    pub fn tech_available<T: Technology + Any>(&mut self) -> Option<TechAvailable<T>> {
-        self.tech_mut::<T>()
-            .as_ref()
-            .map(|_| TechAvailable(PhantomData))
-    }
-    pub fn get_tech<T: Technology + Any>(&mut self, _: TechAvailable<T>) -> &T {
-        self.tech_mut().as_ref().unwrap()
-    }
-    pub fn take_tech<T: Technology + Any>(&mut self, _: TechAvailable<T>) -> T {
-        self.tech_mut().take().unwrap()
-    }
-    pub fn set_tech<T: Technology + Any>(&mut self, t: T) -> TechAvailable<T> {
-        *self.tech_mut() = Some(t);
-        TechAvailable(PhantomData)
+    pub fn reusable<T: Reusable + Any>(&mut self) -> &mut ReusableContainer<T> {
+        self.or_insert_any(|| ReusableContainer::empty())
     }
 
     pub fn machine<M: Machine + Makeable>(&mut self) -> &mut ProducerWithQueue<MultiMachine<M>> {
@@ -196,7 +179,7 @@ impl Resources {
     ) -> &mut ProducerWithQueue<HandCrafter<R>> {
         self.or_insert_producer(|| HandCrafter::<R>::default())
     }
-    pub fn once_maker<O: Clone + Any>(&mut self) -> &mut ProducerWithQueue<OnceMaker<O>>
+    pub fn once_maker<O: Clone + Any + Reusable>(&mut self) -> &mut ProducerWithQueue<OnceMaker<O>>
     where
         TheFirstTime<O>: Makeable,
     {
@@ -215,7 +198,7 @@ impl Resources {
 
         let mut resources = Resources::default();
         resources.resource().add(iron);
-        resources.set_tech(steel_technology);
+        resources.reusable().set(steel_technology);
         resources.add_territory(iron_territory);
         resources.add_territory(copper_territory);
         resources

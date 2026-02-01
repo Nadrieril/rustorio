@@ -24,7 +24,7 @@ impl<O, A: CostIn<O>, B: CostIn<O>> CostIn<O> for (A, B) {
 impl<O, A: CostIn<O>, B: CostIn<O>, C: CostIn<O>> CostIn<O> for (A, B, C) {
     const COST: u32 = A::COST + B::COST + C::COST;
 }
-impl<O, T: ConstMakeable> CostIn<O> for T {
+impl<O, T: BaseRecipe> CostIn<O> for T {
     const COST: u32 = 0;
 }
 impl<O, R: CostIn<O>, const N: usize> CostIn<O> for [R; N] {
