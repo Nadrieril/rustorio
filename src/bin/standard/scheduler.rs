@@ -116,15 +116,6 @@ struct SourceInner<T, S> {
 impl<T: Any, S: Any> Source<T, S> {
     /// Build a pipe. When the sink is fed a value, the source will make it available.
     pub fn make_pipe() -> (Source<T, S>, Sink<T, S>) {
-        Self::flexible_pipe(|sink| sink)
-    }
-    /// Flexible pipe that allows mapping between state types. The sink returned by this only uses
-    /// the function provided if we can't resolve instantly, which makes it different from mapping
-    /// the sink returned by `make_pipe` or mapping the sink passed to `Source::set_sink`.
-    // TODO: make scheduling better so that direct mapping doesn't regress out time.
-    pub fn flexible_pipe<Q: Any>(
-        f: impl FnOnce(Sink<T, S>) -> Sink<T, Q> + 'static,
-    ) -> (Source<T, S>, Sink<T, Q>) {
         let rc = Rc::new(RefCell::new(SourceInner {
             sink: None,
             value: None,
@@ -136,7 +127,7 @@ impl<T: Any, S: Any> Source<T, S> {
                 panic!()
             }
             if let Some(sink) = inner.sink.take() {
-                f(sink).give(s, x);
+                sink.give(s, x);
             } else {
                 inner.value = Some(x);
             }
@@ -196,13 +187,12 @@ impl CallBackQueue {
     /// around. To circumvent that, this makes a `Sink<T, CallBackQueue>` that adds the real sink
     /// to a the callback queue to be resolved when the producer is done.
     pub fn stateless_pipe<T: Any>(&mut self) -> (WakeHandle<T>, Sink<T>) {
-        WakeHandle::flexible_pipe(|state_sink| {
-            Sink::from_fn(|q: &mut CallBackQueue, x| {
-                q.needs_call.push_back(Box::new(|state: &mut GameState| {
-                    state_sink.give(state, x);
-                }))
-            })
-        })
+        let (source, sink) = WakeHandle::make_pipe();
+        let sink = Sink::from_fn(|q: &mut CallBackQueue, x: T| {
+            q.needs_call
+                .push_back(Box::new(|state| sink.give(state, x)))
+        });
+        (source, sink)
     }
 
     /// Get the next callback to call from the callback queue.
@@ -217,15 +207,6 @@ impl GameState {
         f: impl FnOnce(&mut GameState, StateSink<T>),
     ) -> WakeHandle<T> {
         let (h, sink) = WakeHandle::make_pipe();
-        f(self, sink);
-        h
-    }
-
-    pub fn handle_via_sink<T: Any>(
-        &mut self,
-        f: impl FnOnce(&mut GameState, Sink<T>),
-    ) -> WakeHandle<T> {
-        let (h, sink) = self.queue.stateless_pipe();
         f(self, sink);
         h
     }

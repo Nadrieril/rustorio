@@ -264,11 +264,7 @@ mod single_makeable {
         type Input: Makeable;
 
         fn make_to(state: &mut GameState, p: Priority, sink: StateSink<Self>) {
-            let sink = sink.map(Self::make_from_input);
-            // TODO: Weirdly enough, without the stateless indirection I get worse ticks due to the
-            // different (earlier?) scheduling.
-            let sink = state.make_stateless(sink).with_gamestate();
-            state.make_to(p, sink);
+            state.make_to(p, sink.map(Self::make_from_input));
         }
 
         fn make_from_input(state: &mut GameState, input: Self::Input) -> Self;
@@ -363,8 +359,6 @@ mod single_makeable {
             type Input: Makeable;
 
             fn trigger_make(state: &mut GameState, p: Priority, sink: StateSink<Available<Self>>) {
-                // If we let scaling up happen automatically, we apparently lose ticks :(
-                state.scale_up::<OnceMaker<Self>>(p);
                 state.produce_to_state_sink::<OnceMaker<Self>>(p, sink);
             }
 
@@ -500,11 +494,7 @@ impl GameState {
         sink: StateSink<P::Output>,
     ) {
         // Does the conversion between sink types via the `CallBackQueue`.
-        // TODO: Can't use `make_stateless` because that subtly changes the scheduling and
-        // regresses our time.
-        self.handle_via_sink::<<P as Producer>::Output>(|state, sink| {
-            state.produce_to_sink::<P>(p, sink);
-        })
-        .set_sink(self, sink);
+        let sink = self.make_stateless(sink);
+        self.produce_to_sink::<P>(p, sink);
     }
 }
