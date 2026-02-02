@@ -99,8 +99,23 @@ pub struct Producers {
 pub trait ErasedProducer: Any {
     fn name(&self) -> String;
     fn available_parallelism(&self) -> u32;
+    fn projected_parallelism(&self) -> u32;
     fn craft_time(&self) -> u64;
     fn load(&self) -> usize;
+    /// Estimate the time left to produce the current load. `None` if waiting for an external
+    /// event.
+    fn time_left(&self) -> Option<u64> {
+        let load = self.load();
+        let parallelism = self.available_parallelism();
+        let craft_time = self.craft_time();
+        if load == 0 {
+            Some(0)
+        } else if parallelism == 0 {
+            None
+        } else {
+            Some(((load as u64).div_ceil(parallelism as u64)) * craft_time)
+        }
+    }
     fn report_load(&mut self, tick: &Tick) -> Option<String>;
     fn update(&mut self, tick: &Tick, waiters: &mut CallBackQueue);
     fn scale_up_if_needed(&mut self) -> Option<Box<dyn FnOnce(&mut GameState)>>;
@@ -111,6 +126,9 @@ impl<P: Producer> ErasedProducer for ProducerWithQueue<P> {
     }
     fn available_parallelism(&self) -> u32 {
         self.producer.available_parallelism()
+    }
+    fn projected_parallelism(&self) -> u32 {
+        self.available_parallelism() + self.scaling_up
     }
     fn craft_time(&self) -> u64 {
         self.producer.craft_time()

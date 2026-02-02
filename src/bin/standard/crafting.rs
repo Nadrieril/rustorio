@@ -282,8 +282,8 @@ mod single_makeable {
         }
 
         /// Time to produce this item.
-        fn production_time(_state: &mut GameState) -> f32 {
-            0.
+        fn production_time(state: &mut GameState) -> f32 {
+            <Self::Input as Makeable>::production_time(state)
         }
     }
 
@@ -347,6 +347,13 @@ mod single_makeable {
         fn add_edge_to_graph(graph: &mut ResourceGraph, start: GraphNode, _weight: f32) {
             Self::add_node_to_graph(graph);
             graph.add_edge_to::<Self>(start, 0.);
+        }
+
+        fn production_time(state: &mut GameState) -> f32 {
+            match state.resources.reusable::<T>().available() {
+                Some(_) => 0.,
+                None => <Self::Input as Makeable>::production_time(state),
+            }
         }
     }
 

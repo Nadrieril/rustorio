@@ -107,12 +107,13 @@ impl GameState {
                 let name = p.name();
                 let load = p.load();
                 let parallelism = p.available_parallelism();
-                let craft_time = p.craft_time();
-                let time_left = if parallelism == 0 {
-                    if load == 0 { 0. } else { f32::INFINITY }
+                let scaling_up = p.projected_parallelism() - parallelism;
+                let scaling_up = if scaling_up == 0 {
+                    String::new()
                 } else {
-                    (((load as u64).div_ceil(parallelism as u64)) * craft_time) as f32
+                    format!("+{scaling_up}")
                 };
+                let time_left = p.time_left().map(|t| t as f32).unwrap_or(f32::INFINITY);
                 let report = if let Some(s) = p.report_load(&self.tick) {
                     format!(" -- {s}")
                 } else {
@@ -121,7 +122,7 @@ impl GameState {
 
                 [
                     format!(" - {name}"),
-                    format!("  x{parallelism}"),
+                    format!("  x{parallelism}{scaling_up}"),
                     format!("   {load} items"),
                     // format!("   {craft_time}s"),
                     // format!(" per item   {time_left}s"),
