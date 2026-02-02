@@ -562,9 +562,18 @@ impl<P: Producer> ProducerWithQueue<P> {
     /// Checks if scaling up may be needed. If so, return a function to be called on the game state
     /// to schedule a scale up.
     pub fn scale_up_if_needed(&mut self) -> Option<Box<dyn FnOnce(&mut GameState)>> {
-        if self.queue.len()
-            > (self.producer.available_parallelism() + self.scaling_up * 12) as usize * 4
-        {
+        let load = self.load();
+        if load == 0 {
+            return None;
+        }
+        let parallelism = self.available_parallelism() + self.scaling_up;
+        if parallelism == 0 {
+            let p = self.queue.front().unwrap().1;
+            let p = Priority(p.0 + 1);
+            return Some(P::trigger_scale_up(p));
+        }
+
+        if self.queue.len() > (parallelism + self.scaling_up * 5) as usize * 4 {
             let p = self.queue.front().unwrap().1;
             let p = Priority(p.0 + 1);
             Some(P::trigger_scale_up(p))

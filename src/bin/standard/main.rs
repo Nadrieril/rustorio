@@ -227,31 +227,29 @@ impl GameState {
         // self.add_furnace::<IronSmelting>(p);
         // self.add_furnace::<CopperSmelting>(p);
 
-        self.add_miner::<IronOre>(p);
+        // self.add_miner::<IronOre>(p);
         // self.add_miner::<CopperOre>(p);
 
         self.add_furnace::<IronSmelting>(p);
-        self.add_furnace::<CopperSmelting>(p);
+        // self.add_furnace::<CopperSmelting>(p);
 
         let h = self.add_assembler::<CopperWireRecipe>(p);
         self.complete(h);
 
         // self.add_furnace::<IronSmelting>(p);
         // self.add_furnace::<IronSmelting>(p);
-        self.add_miner::<IronOre>(p);
-        self.add_miner::<IronOre>(p);
 
         // self.scale_up::<OnceMaker<SteelSmelting>>(p);
         // self.add_furnace::<IronSmelting>(p);
-        // self.add_miner::<CopperOre>(p);
-        // self.add_miner::<CopperOre>(p);
-        // self.add_miner::<CopperOre>(p);
+        // self.add_furnace::<IronSmelting>(p);
+        self.add_miner::<CopperOre>(p);
+        self.add_miner::<CopperOre>(p);
+        self.add_miner::<CopperOre>(p);
         // self.add_miner::<IronOre>(p);
         // self.add_furnace::<CopperSmelting>(p);
 
         // self.add_assembler::<ElectronicCircuitRecipe>(p);
 
-        self.add_lab::<SteelTechnology>(p);
         // self.scale_up::<OnceMaker<PointRecipe>>(p);
 
         self.add_furnace::<SteelSmelting>(p);
