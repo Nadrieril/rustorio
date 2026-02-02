@@ -1,4 +1,10 @@
-use std::{any::Any, cmp::Reverse, collections::VecDeque, mem, ops::ControlFlow};
+use std::{
+    any::Any,
+    cmp::{Reverse, max, min},
+    collections::VecDeque,
+    mem,
+    ops::ControlFlow,
+};
 
 use itertools::Itertools;
 use rustorio::territory::MINING_TICK_LENGTH;
@@ -114,17 +120,8 @@ impl<M: Machine> MultiMachine<M> {
                 *self = Self::Present(vec![m])
             }
             MultiMachine::Present(items) => {
-                // Get inputs from the other machines to average out the load.
-                let total_load: u32 = items.iter_mut().map(|m| m.input_load(tick)).sum();
-                let average_load: u32 = total_load.div_ceil((items.len() + 1) as u32);
-                for n in items.iter_mut() {
-                    while n.input_load(tick) > average_load
-                        && let Some(input) = n.pop_inputs(tick)
-                    {
-                        m.add_inputs(tick, input);
-                    }
-                }
-                items.push(m)
+                items.push(m);
+                self.rebalance_loads(tick);
             }
             MultiMachine::Removed => {
                 panic!("trying to craft with a removed {}", type_name::<M>())
@@ -155,22 +152,50 @@ impl<M: Machine> MultiMachine<M> {
         }
     }
 
+    fn rebalance_loads(&mut self, tick: &Tick) {
+        match self {
+            MultiMachine::Present(machines) => {
+                let mut min_load = u32::MAX;
+                let mut max_load = 0;
+                let mut total_load = 0;
+                for m in machines.iter_mut() {
+                    let load = m.input_load(tick);
+                    min_load = min(min_load, load);
+                    max_load = max(max_load, load);
+                    total_load += load;
+                }
+                if min_load == 0 || max_load - min_load > 5 {
+                    // Average out the load.
+                    let average_load: u32 = total_load.div_ceil(machines.len() as u32);
+                    let mut above_average = vec![];
+                    for m in machines.iter_mut() {
+                        while m.input_load(tick) > average_load
+                            && let Some(input) = m.pop_inputs(tick)
+                        {
+                            above_average.push(input);
+                        }
+                    }
+                    for m in machines.iter_mut() {
+                        while m.input_load(tick) < average_load
+                            && let Some(input) = above_average.pop()
+                        {
+                            m.add_inputs(tick, input);
+                        }
+                    }
+                    assert_eq!(above_average.len(), 0);
+                }
+            }
+            MultiMachine::NoMachine { .. } | MultiMachine::Removed => {}
+        }
+    }
+
     fn poll(&mut self, tick: &Tick) -> Option<<M::Recipe as ConstRecipe>::BundledOutputs> {
+        self.rebalance_loads(tick);
         match self {
             MultiMachine::NoMachine { outputs, .. } => outputs.pop(),
             MultiMachine::Present(machines) => {
-                for (i, m) in machines.iter_mut().enumerate() {
+                for m in machines {
                     if let Some(o) = m.pop_outputs(tick) {
-                        if m.input_load(tick) == 0 {
-                            // Attempt to steal work from other machines.
-                            for m in machines.iter_mut() {
-                                if m.input_load(tick) >= 2 {
-                                    let inputs = m.pop_inputs(tick).unwrap();
-                                    machines[i].add_inputs(tick, inputs);
-                                    break;
-                                }
-                            }
-                        }
                         return Some(o);
                     }
                 }
