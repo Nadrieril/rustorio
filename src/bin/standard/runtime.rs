@@ -83,7 +83,7 @@ impl GameState {
                 scale_ups.push(f);
             }
         }
-        for f in scale_ups {
+        for f in scale_ups.drain(..) {
             f(self);
         }
         while let Some(f) = self.queue.next_callback() {

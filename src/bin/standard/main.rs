@@ -118,7 +118,7 @@ pub trait ErasedProducer: Any {
     }
     fn report_load(&mut self, tick: &Tick) -> Option<String>;
     fn update(&mut self, tick: &Tick, waiters: &mut CallBackQueue);
-    fn scale_up_if_needed(&mut self) -> Option<Box<dyn FnOnce(&mut GameState)>>;
+    fn scale_up_if_needed(&mut self) -> Option<Box<dyn FnOnce(&mut GameState) -> bool>>;
 }
 impl<P: Producer> ErasedProducer for ProducerWithQueue<P> {
     fn name(&self) -> String {
@@ -142,7 +142,7 @@ impl<P: Producer> ErasedProducer for ProducerWithQueue<P> {
     fn update(&mut self, tick: &Tick, waiters: &mut CallBackQueue) {
         self.update(tick, waiters);
     }
-    fn scale_up_if_needed(&mut self) -> Option<Box<dyn FnOnce(&mut GameState)>> {
+    fn scale_up_if_needed(&mut self) -> Option<Box<dyn FnOnce(&mut GameState) -> bool>> {
         self.scale_up_if_needed()
     }
 }

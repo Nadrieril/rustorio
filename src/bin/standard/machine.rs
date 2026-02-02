@@ -246,7 +246,7 @@ pub trait Producer: Any + Sized {
         StateSink::from_fn(|_state, ()| ())
     }
     /// Trigger a scaling up. This ensures we don't scale up many times in parallel.
-    fn trigger_scale_up(p: Priority) -> Box<dyn FnOnce(&mut GameState)> {
+    fn trigger_scale_up(p: Priority) -> Box<dyn FnOnce(&mut GameState) -> bool> {
         Box::new(move |state| {
             eprintln!("scaling up {}", type_name::<Self>());
             let this = state.producer::<Self>();
@@ -255,6 +255,7 @@ pub trait Producer: Any + Sized {
                 state.producer::<Self>().scaling_up -= 1;
             });
             this.producer.scale_up(p, when_done).give(state, ());
+            true
         })
     }
 }
@@ -283,6 +284,10 @@ impl<R: HandRecipe + ConstRecipe + Any> Producer for HandCrafter<R> {
     fn poll(&mut self, _tick: &Tick) -> Option<Self::Output> {
         self.outputs.pop()
     }
+
+    fn trigger_scale_up(_p: Priority) -> Box<dyn FnOnce(&mut GameState) -> bool> {
+        Box::new(move |_state| false)
+    }
 }
 
 impl<Ore: ResourceType + Any> Producer for Territory<Ore> {
@@ -308,13 +313,19 @@ impl<Ore: ResourceType + Any> Producer for Territory<Ore> {
         self.resources(tick).bundle().ok().map(|x| (x,))
     }
 
-    fn scale_up(&mut self, p: Priority, done: StateSink<()>) -> StateSink<()> {
-        let num_miners = self.num_miners();
-        let max_miners = self.max_miners();
-        StateSink::from_fn(move |state, ()| {
+    fn scale_up(&mut self, _p: Priority, _done: StateSink<()>) -> StateSink<()> {
+        unreachable!()
+    }
+    fn trigger_scale_up(p: Priority) -> Box<dyn FnOnce(&mut GameState) -> bool> {
+        Box::new(move |state| {
             let this = state.producer::<Self>();
-            if num_miners + this.scaling_up <= max_miners {
-                let add_miner = done.map(|state, miner: Miner| {
+            let num_miners = this.producer.num_miners();
+            let max_miners = this.producer.max_miners();
+            if num_miners + this.scaling_up < max_miners {
+                eprintln!("scaling up {}", type_name::<Self>());
+                this.scaling_up += 1;
+                let add_miner = StateSink::from_fn(|state, miner: Miner| {
+                    state.producer::<Self>().scaling_up -= 1;
                     state
                         .producers
                         .producer::<Self>()
@@ -323,6 +334,9 @@ impl<Ore: ResourceType + Any> Producer for Territory<Ore> {
                         .unwrap();
                 });
                 state.make_to(p, add_miner);
+                true
+            } else {
+                false
             }
         })
     }
@@ -561,7 +575,7 @@ impl<P: Producer> ProducerWithQueue<P> {
 
     /// Checks if scaling up may be needed. If so, return a function to be called on the game state
     /// to schedule a scale up.
-    pub fn scale_up_if_needed(&mut self) -> Option<Box<dyn FnOnce(&mut GameState)>> {
+    pub fn scale_up_if_needed(&mut self) -> Option<Box<dyn FnOnce(&mut GameState) -> bool>> {
         let load = self.load();
         if load == 0 {
             return None;
@@ -600,7 +614,7 @@ impl<P: Producer> ProducerWithQueue<P> {
 impl GameState {
     /// Enqueue the creation of a new producing entity for this producer type.
     pub fn scale_up<P: Producer>(&mut self, p: Priority) {
-        <P>::trigger_scale_up(p)(self)
+        <P>::trigger_scale_up(p)(self);
     }
 
     pub fn add_miner<Ore: ResourceType + Any>(&mut self, p: Priority) {
