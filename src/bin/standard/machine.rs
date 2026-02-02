@@ -242,6 +242,8 @@ pub trait Producer: Any + Sized {
 
     /// Count the number of producing entities (miners, assemblers, ..) available.
     fn available_parallelism(&self) -> u32;
+    /// Maximum number of producing entities allowed.
+    fn max_parallelism(&self) -> u32;
     /// The time it takes for a producing entity to make a single output.
     fn craft_time(&self) -> u64;
 
@@ -265,21 +267,20 @@ pub trait Producer: Any + Sized {
         })
     }
 
-    /// Schedule the addition of a new producing entity of this type. This is called when the load
-    /// becomes too high compared to the available parallelism.
-    fn scale_up(&mut self, _p: Priority, _done: StateSink<()>) -> StateSink<()> {
-        StateSink::from_fn(|_state, ()| ())
-    }
+    /// Add a new producing entity.
+    fn scale_up(_state: &mut GameState, _entity: Self::CraftingEntity) {}
+
     /// Trigger a scaling up. This ensures we don't scale up many times in parallel.
     fn trigger_scale_up(p: Priority) -> Box<dyn FnOnce(&mut GameState) -> bool> {
         Box::new(move |state| {
             eprintln!("scaling up {}", type_name::<Self>());
             let this = state.producer::<Self>();
             this.scaling_up += 1;
-            let when_done = StateSink::from_fn(|state, ()| {
+            let add_entity = StateSink::from_fn(|state, entity| {
                 state.producer::<Self>().scaling_up -= 1;
+                Self::scale_up(state, entity);
             });
-            this.producer.scale_up(p, when_done).give(state, ());
+            state.make_to(p, add_entity);
             true
         })
     }
@@ -299,6 +300,9 @@ impl<R: HandRecipe + ConstRecipe + Any> Producer for HandCrafter<R> {
     fn available_parallelism(&self) -> u32 {
         1
     }
+    fn max_parallelism(&self) -> u32 {
+        1
+    }
     fn craft_time(&self) -> u64 {
         <R as Recipe>::TIME
     }
@@ -308,10 +312,6 @@ impl<R: HandRecipe + ConstRecipe + Any> Producer for HandCrafter<R> {
     }
     fn poll(&mut self, _tick: &Tick) -> Option<Self::Output> {
         self.outputs.pop()
-    }
-
-    fn trigger_scale_up(_p: Priority) -> Box<dyn FnOnce(&mut GameState) -> bool> {
-        Box::new(move |_state| false)
     }
 }
 
@@ -329,6 +329,9 @@ impl<Ore: ResourceType + Any> Producer for Territory<Ore> {
     fn available_parallelism(&self) -> u32 {
         self.num_miners()
     }
+    fn max_parallelism(&self) -> u32 {
+        self.max_miners()
+    }
     fn craft_time(&self) -> u64 {
         MINING_TICK_LENGTH
     }
@@ -338,32 +341,13 @@ impl<Ore: ResourceType + Any> Producer for Territory<Ore> {
         self.resources(tick).bundle().ok().map(|x| (x,))
     }
 
-    fn scale_up(&mut self, _p: Priority, _done: StateSink<()>) -> StateSink<()> {
-        unreachable!()
-    }
-    fn trigger_scale_up(p: Priority) -> Box<dyn FnOnce(&mut GameState) -> bool> {
-        Box::new(move |state| {
-            let this = state.producer::<Self>();
-            let num_miners = this.producer.num_miners();
-            let max_miners = this.producer.max_miners();
-            if num_miners + this.scaling_up < max_miners {
-                eprintln!("scaling up {}", type_name::<Self>());
-                this.scaling_up += 1;
-                let add_miner = StateSink::from_fn(|state, miner: Miner| {
-                    state.producer::<Self>().scaling_up -= 1;
-                    state
-                        .producers
-                        .producer::<Self>()
-                        .producer
-                        .add_miner(&state.tick, miner)
-                        .unwrap();
-                });
-                state.make_to(p, add_miner);
-                true
-            } else {
-                false
-            }
-        })
+    fn scale_up(state: &mut GameState, miner: Self::CraftingEntity) {
+        state
+            .producers
+            .producer::<Self>()
+            .producer
+            .add_miner(&state.tick, miner)
+            .unwrap();
     }
 }
 
@@ -383,6 +367,9 @@ where
     }
     fn available_parallelism(&self) -> u32 {
         self.count()
+    }
+    fn max_parallelism(&self) -> u32 {
+        u32::MAX
     }
     fn craft_time(&self) -> u64 {
         <M::Recipe as Recipe>::TIME
@@ -408,13 +395,12 @@ where
         self.poll(tick)
     }
 
-    fn scale_up(&mut self, p: Priority, done: StateSink<()>) -> StateSink<()> {
-        StateSink::from_fn(move |state, ()| {
-            let add_machine = done.map(|state, machine: M| {
-                state.producers.machine().producer.add(&state.tick, machine);
-            });
-            state.make_to(p, add_machine);
-        })
+    fn scale_up(state: &mut GameState, machine: Self::CraftingEntity) {
+        state
+            .producers
+            .producer::<Self>()
+            .producer
+            .add(&state.tick, machine);
     }
 }
 
@@ -482,15 +468,11 @@ where
 
 /// Producer that represents items that are produced only once.
 pub struct OnceMaker<O: Reusable> {
-    is_started: bool,
     available: Option<Available<O>>,
 }
 impl<O: Reusable> Default for OnceMaker<O> {
     fn default() -> Self {
-        Self {
-            is_started: false,
-            available: None,
-        }
+        Self { available: None }
     }
 }
 
@@ -500,7 +482,7 @@ where
 {
     type Input = ();
     type Output = Available<O>;
-    type CraftingEntity = ();
+    type CraftingEntity = <O as OnceMakeable>::Input;
 
     fn name() -> String {
         type_name::<Self>()
@@ -511,6 +493,9 @@ where
     fn available_parallelism(&self) -> u32 {
         self.available.is_some() as u32
     }
+    fn max_parallelism(&self) -> u32 {
+        1
+    }
     fn craft_time(&self) -> u64 {
         0
     }
@@ -520,20 +505,10 @@ where
         self.available.clone()
     }
 
-    fn scale_up(&mut self, p: Priority, done: StateSink<()>) -> StateSink<()> {
-        if !self.is_started {
-            self.is_started = true;
-            StateSink::from_fn(move |state, ()| {
-                let produce = done.map(|state, inputs| {
-                    let o = <O as OnceMakeable>::make_from_input(state, inputs);
-                    let token = state.resources.reusable().set(o);
-                    state.producer::<Self>().producer.available = Some(token);
-                });
-                state.make_to(p, produce);
-            })
-        } else {
-            done
-        }
+    fn scale_up(state: &mut GameState, inputs: Self::CraftingEntity) {
+        let o = <O as OnceMakeable>::make_from_input(state, inputs);
+        let token = state.resources.reusable().set(o);
+        state.producer::<Self>().producer.available = Some(token);
     }
 }
 
@@ -606,13 +581,16 @@ impl<P: Producer> ProducerWithQueue<P> {
             return None;
         }
         let parallelism = self.available_parallelism() + self.scaling_up;
+        if parallelism >= self.producer.max_parallelism() {
+            return None;
+        }
         if parallelism == 0 {
             let p = self.queue.front().unwrap().1;
             let p = Priority(p.0 + 1);
             return Some(P::trigger_scale_up(p));
         }
 
-        if self.queue.len() > (parallelism + self.scaling_up * 5) as usize * 4 {
+        if load > (parallelism + self.scaling_up * 5) as usize * 4 {
             let p = self.queue.front().unwrap().1;
             let p = Priority(p.0 + 1);
             Some(P::trigger_scale_up(p))
@@ -648,14 +626,11 @@ impl GameState {
 
     pub fn add_machine<M: Machine + Makeable>(&mut self, p: Priority) -> WakeHandle<()> {
         self.handle_via_state_sink(|state, sink| {
-            // self.scale_up::<MultiMachine<M>>(p)
             // TODO: If we use `trigger_scale_up` then we lose some parallelism :(
-            state
-                .producers
-                .machine::<M>()
-                .producer
-                .scale_up(p, sink)
-                .give(state, ())
+            let add_machine = sink.map(|state, machine| {
+                <MultiMachine<M>>::scale_up(state, machine);
+            });
+            state.make_to(p, add_machine);
         })
     }
     pub fn add_assembler<R>(&mut self, p: Priority) -> WakeHandle<()>
