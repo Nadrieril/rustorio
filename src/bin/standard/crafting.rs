@@ -140,6 +140,7 @@ mod bundle_makeable {
         fn add_node_to_graph(graph: &mut ResourceGraph) {
             if let Some(id) = graph.add_node::<Self>() {
                 let weight = 1f32 / <Self::Producer as SingleOutputProducer>::Output::AMOUNT as f32;
+                <<Self::Producer as Producer>::CraftingEntity>::add_edge_to_graph(graph, id, 0.);
                 <<Self::Producer as Producer>::Input as Makeable>::add_edge_to_graph(
                     graph, id, weight,
                 );
@@ -296,6 +297,12 @@ mod single_makeable {
 
         fn make_from_input(_state: &mut GameState, _input: Self::Input) -> Self {
             unreachable!()
+        }
+
+        // Override the weight to make the graph prettier.
+        fn add_edge_to_graph(graph: &mut ResourceGraph, start: GraphNode, _weight: f32) {
+            Self::add_node_to_graph(graph);
+            graph.add_edge_to::<Self>(start, 0.);
         }
     }
 

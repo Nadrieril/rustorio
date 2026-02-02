@@ -242,6 +242,7 @@ impl GameState {
 
         let victory: Victory = self.complete(victory);
 
+        self.graph.set_display_root::<Victory>();
         println!("{}", self.graph);
 
         (self.tick.into_inner(), victory)

@@ -1,7 +1,11 @@
 use std::collections::hash_map::Entry;
 
 use itertools::Itertools;
-use petgraph::prelude::DiGraphMap;
+use petgraph::{
+    matrix_graph::Zero,
+    prelude::DiGraphMap,
+    visit::{DfsPostOrder, Walker},
+};
 
 use crate::*;
 
@@ -75,6 +79,8 @@ const _: () = {
 pub struct ResourceGraph {
     name_map: HashMap<GraphNode, String>,
     graph: DiGraphMap<GraphNode, f32>,
+    /// Where to start the DFS when displaying the graph.
+    graph_root: Option<GraphNode>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -84,7 +90,14 @@ impl std::fmt::Display for ResourceGraph {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut first_col: Vec<_> = vec![];
         let mut rows: Vec<Vec<_>> = vec![];
-        for id in self.graph.nodes() {
+        let first_node = self
+            .graph_root
+            .unwrap_or_else(|| self.graph.nodes().next().unwrap());
+        let topo_sort = DfsPostOrder::new(&self.graph, first_node)
+            .iter(&self.graph)
+            .collect_vec();
+        for id in topo_sort.into_iter().rev() {
+            // for id in self.graph.nodes() {
             first_col.push(self.name_map.get(&id).unwrap());
             rows.push(
                 self.graph
@@ -92,7 +105,12 @@ impl std::fmt::Display for ResourceGraph {
                     .map(|tgt| {
                         let w = self.graph.edge_weight(id, tgt).unwrap();
                         let name = self.name_map.get(&tgt).unwrap();
-                        format!("{w} {name}")
+                        let w = if w.is_zero() {
+                            String::new()
+                        } else {
+                            format!("{w} ")
+                        };
+                        format!("{w}{name}")
                     })
                     .collect_vec(),
             );
@@ -140,5 +158,10 @@ impl ResourceGraph {
     pub fn add_edge_to<T: Any>(&mut self, start: GraphNode, weight: f32) {
         let to = Self::node_for::<T>();
         self.graph.add_edge(start, to, weight);
+    }
+
+    /// Set the node to use as root when displaying the graph.
+    pub fn set_display_root<T: Any>(&mut self) {
+        self.graph_root = Some(Self::node_for::<T>())
     }
 }

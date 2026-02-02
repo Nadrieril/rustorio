@@ -198,6 +198,8 @@ impl<R: ConstRecipe> Default for HandCrafter<R> {
 pub trait Producer: Any + Sized {
     type Input: Any;
     type Output: Any;
+    type CraftingEntity: Makeable;
+
     fn name() -> String;
 
     fn get_ref(producers: &mut Producers) -> &mut ProducerWithQueue<Self>;
@@ -253,6 +255,8 @@ pub trait Producer: Any + Sized {
 impl<R: HandRecipe + ConstRecipe + Any> Producer for HandCrafter<R> {
     type Input = <R as ConstRecipe>::BundledInputs;
     type Output = <R as ConstRecipe>::BundledOutputs;
+    type CraftingEntity = ();
+
     fn name() -> String {
         type_name::<R>()
     }
@@ -280,6 +284,8 @@ where
 {
     type Input = ();
     type Output = (Bundle<Ore, 1>,);
+    type CraftingEntity = Miner;
+
     fn name() -> String {
         type_name::<Ore>()
     }
@@ -322,6 +328,8 @@ where
 {
     type Input = <M::Recipe as ConstRecipe>::BundledInputs;
     type Output = <M::Recipe as ConstRecipe>::BundledOutputs;
+    type CraftingEntity = M;
+
     fn name() -> String {
         type_name::<M::Recipe>()
     }
@@ -450,6 +458,8 @@ where
 {
     type Input = ();
     type Output = Available<O>;
+    type CraftingEntity = ();
+
     fn name() -> String {
         type_name::<Self>()
     }
