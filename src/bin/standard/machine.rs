@@ -220,13 +220,10 @@ pub trait Producer: Any + Sized {
     /// Turn a receiver of outputs into a receiver of inputs.
     fn feed(p: Priority, sink: Sink<Self::Output>) -> StateSink<Self::Input> {
         StateSink::from_fn(move |state, inputs| {
-            Self::get_ref(&mut state.producers).feed(
-                &state.tick,
-                &mut state.queue,
-                p,
-                inputs,
-                sink,
-            );
+            state
+                .producers
+                .producer::<Self>()
+                .feed(&state.tick, &mut state.queue, p, inputs, sink);
         })
     }
 
@@ -239,10 +236,10 @@ pub trait Producer: Any + Sized {
     fn trigger_scale_up(p: Priority) -> Box<dyn FnOnce(&mut GameState)> {
         Box::new(move |state| {
             eprintln!("scaling up {}", type_name::<Self>());
-            let this = Self::get_ref(&mut state.producers);
+            let this = state.producer::<Self>();
             this.scaling_up += 1;
             let when_done = StateSink::from_fn(|state, ()| {
-                Self::get_ref(&mut state.producers).scaling_up -= 1;
+                state.producer::<Self>().scaling_up -= 1;
             });
             this.producer.scale_up(p, when_done).give(state, ());
         })
@@ -296,10 +293,12 @@ impl<Ore: ResourceType + Any> Producer for Territory<Ore> {
         let num_miners = self.num_miners();
         let max_miners = self.max_miners();
         StateSink::from_fn(move |state, ()| {
-            let this = Self::get_ref(&mut state.producers);
+            let this = state.producer::<Self>();
             if num_miners + this.scaling_up <= max_miners {
                 let add_miner = done.map(|state, miner: Miner| {
-                    Self::get_ref(&mut state.producers)
+                    state
+                        .producers
+                        .producer::<Self>()
                         .producer
                         .add_miner(&state.tick, miner)
                         .unwrap();
@@ -464,7 +463,7 @@ where
                 let produce = done.map(|state, inputs| {
                     let o = <O as OnceMakeable>::make_from_input(state, inputs);
                     let token = state.resources.reusable().set(o);
-                    Self::get_ref(&mut state.producers).producer.available = Some(token);
+                    state.producer::<Self>().producer.available = Some(token);
                 });
                 state.make_to(p, produce);
             })

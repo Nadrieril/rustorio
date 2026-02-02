@@ -433,6 +433,10 @@ impl GameState {
         T::make_to(self, p, sink)
     }
 
+    pub fn producer<P: Producer>(&mut self) -> &mut ProducerWithQueue<P> {
+        self.producers.producer()
+    }
+
     /// Give input to the producer and wait for it to produce output.
     /// This is the main wait point of our system.
     pub fn produce_to_sink<P: Producer<Input: Makeable>>(

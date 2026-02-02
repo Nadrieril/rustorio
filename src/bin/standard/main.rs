@@ -154,6 +154,7 @@ impl Producers {
         self.producers
             .insert(TypeId::of::<P>(), Box::new(ProducerWithQueue::new(p)));
     }
+    /// Gets a producer of this type if there is one.
     fn get_producer<P: Producer>(&mut self) -> &mut ProducerWithQueue<P> {
         let storage: &mut (dyn ErasedProducer + 'static) =
             self.producers.get_mut(&TypeId::of::<P>()).unwrap().as_mut();
@@ -164,6 +165,11 @@ impl Producers {
         self.producers.values_mut().map(|s| s.as_mut())
     }
 
+    /// Gets or creates a producer of this type.
+    pub fn producer<P: Producer>(&mut self) -> &mut ProducerWithQueue<P> {
+        // Calls the appropriate producer method.
+        P::get_ref(self)
+    }
     pub fn machine<M: Machine + Makeable>(&mut self) -> &mut ProducerWithQueue<MultiMachine<M>> {
         self.or_insert_producer(|| MultiMachine::<M>::default())
     }
