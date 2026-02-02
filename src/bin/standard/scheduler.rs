@@ -212,13 +212,6 @@ impl CallBackQueue {
 }
 
 impl GameState {
-    pub fn nowait<T: Any>(&mut self, x: T) -> WakeHandle<T> {
-        WakeHandle::make_resolved(x)
-    }
-    pub fn never<T: Any>(&mut self) -> WakeHandle<T> {
-        self.handle_via_sink(|_, _sink| ())
-    }
-
     pub fn handle_via_sink<T: Any>(
         &mut self,
         f: impl FnOnce(&mut GameState, Sink<T>),
@@ -232,65 +225,5 @@ impl GameState {
         let (h, sink) = self.queue.stateless_pipe();
         h.set_sink(self, state_sink);
         sink
-    }
-
-    pub fn map_to_sink<T: Any>(&mut self, h: WakeHandle<T>, sink: Sink<T>) {
-        h.set_sink(self, sink.with_gamestate());
-    }
-
-    pub fn map<T: Any, U: Any>(
-        &mut self,
-        h: WakeHandle<T>,
-        f: impl FnOnce(&mut GameState, T) -> U + 'static,
-    ) -> WakeHandle<U> {
-        self.handle_via_sink(|state, sink| {
-            h.set_sink(state, sink.with_gamestate().map(f));
-        })
-    }
-
-    /// Schedules `f` to run after `h` completes, and returns a handle to the final output.
-    pub fn then<T: Any, U: Any>(
-        &mut self,
-        h: WakeHandle<T>,
-        f: impl FnOnce(&mut GameState, T) -> WakeHandle<U> + 'static,
-    ) -> WakeHandle<U> {
-        self.map(h, f).flatten(self)
-    }
-
-    /// Joins the results of two handles together.
-    pub fn pair<T: Any, U: Any>(
-        &mut self,
-        a: WakeHandle<T>,
-        b: WakeHandle<U>,
-    ) -> WakeHandle<(T, U)> {
-        self.handle_via_sink(|state, sink| {
-            let (sink_a, sink_b) = sink.split();
-            state.map_to_sink(a, sink_a);
-            state.map_to_sink(b, sink_b);
-        })
-    }
-
-    pub fn triple<T: Any, U: Any, V: Any>(
-        &mut self,
-        x: WakeHandle<T>,
-        y: WakeHandle<U>,
-        z: WakeHandle<V>,
-    ) -> WakeHandle<(T, U, V)> {
-        let xy = self.pair(x, y);
-        let xyz = self.pair(xy, z);
-        self.map(xyz, |_, ((x, y), z)| (x, y, z))
-    }
-
-    /// Joins the results of two handles together.
-    pub fn collect_n<const N: usize, T: Any>(
-        &mut self,
-        handles: [WakeHandle<T>; N],
-    ) -> WakeHandle<[T; N]> {
-        self.handle_via_sink(|state, sink| {
-            let sinks = sink.split_n();
-            for (sink, h) in sinks.into_iter().zip(handles) {
-                state.map_to_sink(h, sink);
-            }
-        })
     }
 }
