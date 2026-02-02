@@ -167,16 +167,10 @@ impl Producers {
     pub fn machine<M: Machine + Makeable>(&mut self) -> &mut ProducerWithQueue<MultiMachine<M>> {
         self.or_insert_producer(|| MultiMachine::<M>::default())
     }
-    pub fn add_territory<O: ResourceType + Any>(&mut self, t: Territory<O>)
-    where
-        Miner: CostIn<O>,
-    {
+    pub fn add_territory<O: ResourceType + Any>(&mut self, t: Territory<O>) {
         self.insert_producer(t);
     }
-    pub fn territory<O: ResourceType + Any>(&mut self) -> &mut ProducerWithQueue<Territory<O>>
-    where
-        Miner: CostIn<O>,
-    {
+    pub fn territory<O: ResourceType + Any>(&mut self) -> &mut ProducerWithQueue<Territory<O>> {
         self.get_producer()
     }
     pub fn hand_crafter<R: HandRecipe + ConstRecipe>(

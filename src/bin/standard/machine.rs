@@ -206,9 +206,6 @@ pub trait Producer: Any + Sized {
 
     /// Count the number of producing entities (miners, assemblers, ..) available.
     fn available_parallelism(&self) -> u32;
-    /// Count the number of production cycles it takes to produce an extra producing entity for
-    /// this. Used as a heuristic for scaling up.
-    fn self_cost(&self) -> u32;
 
     /// Detailed load reporting, if available.
     fn report_load(&mut self, _tick: &Tick) -> Option<String> {
@@ -266,9 +263,6 @@ impl<R: HandRecipe + ConstRecipe + Any> Producer for HandCrafter<R> {
     fn available_parallelism(&self) -> u32 {
         1
     }
-    fn self_cost(&self) -> u32 {
-        0
-    }
 
     fn add_inputs(&mut self, _tick: &Tick, inputs: Self::Input) {
         self.inputs.push(inputs);
@@ -278,10 +272,7 @@ impl<R: HandRecipe + ConstRecipe + Any> Producer for HandCrafter<R> {
     }
 }
 
-impl<Ore: ResourceType + Any> Producer for Territory<Ore>
-where
-    Miner: CostIn<Ore>,
-{
+impl<Ore: ResourceType + Any> Producer for Territory<Ore> {
     type Input = ();
     type Output = (Bundle<Ore, 1>,);
     type CraftingEntity = Miner;
@@ -294,9 +285,6 @@ where
     }
     fn available_parallelism(&self) -> u32 {
         self.num_miners()
-    }
-    fn self_cost(&self) -> u32 {
-        <Miner as CostIn<Ore>>::COST
     }
 
     fn add_inputs(&mut self, _tick: &Tick, _inputs: Self::Input) {}
@@ -338,9 +326,6 @@ where
     }
     fn available_parallelism(&self) -> u32 {
         self.count()
-    }
-    fn self_cost(&self) -> u32 {
-        todo!()
     }
     fn report_load(&mut self, tick: &Tick) -> Option<String> {
         match self {
@@ -403,10 +388,7 @@ where
         }
     }
 }
-impl<Ore: ResourceType + Any> HandProducer for Territory<Ore>
-where
-    Miner: CostIn<Ore>,
-{
+impl<Ore: ResourceType + Any> HandProducer for Territory<Ore> {
     fn can_craft_automatically(&self) -> bool {
         self.num_miners() > 0
     }
@@ -468,9 +450,6 @@ where
     }
     fn available_parallelism(&self) -> u32 {
         self.available.is_some() as u32
-    }
-    fn self_cost(&self) -> u32 {
-        0
     }
 
     fn add_inputs(&mut self, _tick: &Tick, _inputs: Self::Input) {}
@@ -591,10 +570,7 @@ impl GameState {
         <P>::trigger_scale_up(p)(self)
     }
 
-    pub fn add_miner<Ore: ResourceType + Any>(&mut self, p: Priority)
-    where
-        Miner: CostIn<Ore>,
-    {
+    pub fn add_miner<Ore: ResourceType + Any>(&mut self, p: Priority) {
         self.scale_up::<Territory<Ore>>(p)
     }
 
