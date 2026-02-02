@@ -99,22 +99,39 @@ impl GameState {
         }
         self.last_reported_tick = self.tick.cur();
 
-        // TODO: how about add a machine if load too big? Clients are only waiting when the inputs
-        // are ready so this isn't backpressure, it's a bottleneck.
         let r = &mut self.producers;
         let loads = r
             .iter_producers()
             .sorted_by_key(|p| p.name())
             .map(|p| {
-                format!(
-                    " - {} (x{}): {}\n",
-                    p.name(),
-                    p.available_parallelism(),
-                    p.report_load(&self.tick)
-                )
+                let name = p.name();
+                let load = p.load();
+                let parallelism = p.available_parallelism();
+                let craft_time = p.craft_time();
+                let time_left = if parallelism == 0 {
+                    if load == 0 { 0. } else { f32::INFINITY }
+                } else {
+                    (((load as u64).div_ceil(parallelism as u64)) * craft_time) as f32
+                };
+                let report = if let Some(s) = p.report_load(&self.tick) {
+                    format!(" -- {s}")
+                } else {
+                    String::new()
+                };
+
+                [
+                    format!(" - {name}"),
+                    format!("  x{parallelism}"),
+                    format!("   {load} items"),
+                    // format!("   {craft_time}s"),
+                    // format!(" per item   {time_left}s"),
+                    format!("   {time_left}s"),
+                    format!(" left   {report}"),
+                ]
             })
-            .format("");
-        eprintln!("{}:\n{}", self.tick.as_ref(), loads);
+            .collect_vec();
+        let loads = format_in_columns(&loads);
+        eprintln!("{}:\n{}\n", self.tick.as_ref(), loads);
     }
 
     pub fn complete<R: Any>(&mut self, mut h: WakeHandle<R>) -> R {

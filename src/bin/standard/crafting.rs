@@ -10,6 +10,9 @@ pub trait Makeable: Any + Sized {
     fn add_nodes_to_graph(graph: &mut ResourceGraph);
     /// Record an edge to these resources in the global resource graph.
     fn add_edge_to_graph(graph: &mut ResourceGraph, start: GraphNode, weight: f32);
+
+    /// Estimated time to produce this item.
+    fn production_time(state: &mut GameState) -> f32;
 }
 impl Makeable for () {
     fn make_to(state: &mut GameState, _p: Priority, sink: StateSink<Self>) {
@@ -18,6 +21,10 @@ impl Makeable for () {
 
     fn add_nodes_to_graph(_graph: &mut ResourceGraph) {}
     fn add_edge_to_graph(_graph: &mut ResourceGraph, _start: GraphNode, _weight: f32) {}
+
+    fn production_time(_state: &mut GameState) -> f32 {
+        0.
+    }
 }
 impl<A: Makeable> Makeable for (A,) {
     fn make_to(state: &mut GameState, p: Priority, sink: StateSink<Self>) {
@@ -29,6 +36,10 @@ impl<A: Makeable> Makeable for (A,) {
     }
     fn add_edge_to_graph(graph: &mut ResourceGraph, start: GraphNode, weight: f32) {
         A::add_edge_to_graph(graph, start, weight);
+    }
+
+    fn production_time(state: &mut GameState) -> f32 {
+        A::production_time(state)
     }
 }
 impl<A: Makeable, B: Makeable> Makeable for (A, B) {
@@ -45,6 +56,10 @@ impl<A: Makeable, B: Makeable> Makeable for (A, B) {
     fn add_edge_to_graph(graph: &mut ResourceGraph, start: GraphNode, weight: f32) {
         A::add_edge_to_graph(graph, start, weight);
         B::add_edge_to_graph(graph, start, weight);
+    }
+
+    fn production_time(state: &mut GameState) -> f32 {
+        A::production_time(state).max(B::production_time(state))
     }
 }
 impl<A: Makeable, B: Makeable, C: Makeable> Makeable for (A, B, C) {
@@ -67,6 +82,12 @@ impl<A: Makeable, B: Makeable, C: Makeable> Makeable for (A, B, C) {
         B::add_edge_to_graph(graph, start, weight);
         C::add_edge_to_graph(graph, start, weight);
     }
+
+    fn production_time(state: &mut GameState) -> f32 {
+        A::production_time(state)
+            .max(B::production_time(state))
+            .max(C::production_time(state))
+    }
 }
 impl<const N: usize, T: Makeable> Makeable for [T; N] {
     fn make_to(state: &mut GameState, p: Priority, sink: StateSink<Self>) {
@@ -80,6 +101,10 @@ impl<const N: usize, T: Makeable> Makeable for [T; N] {
     }
     fn add_edge_to_graph(graph: &mut ResourceGraph, start: GraphNode, weight: f32) {
         T::add_edge_to_graph(graph, start, weight * N as f32);
+    }
+
+    fn production_time(state: &mut GameState) -> f32 {
+        T::production_time(state) * N as f32
     }
 }
 
@@ -106,6 +131,10 @@ where
     }
     fn add_edge_to_graph(graph: &mut ResourceGraph, start: GraphNode, weight: f32) {
         <R as BundleMakeable>::add_edge_to_graph(graph, start, weight * AMOUNT as f32);
+    }
+
+    fn production_time(state: &mut GameState) -> f32 {
+        <R as BundleMakeable>::production_time(state) * AMOUNT as f32
     }
 }
 
@@ -150,6 +179,16 @@ mod bundle_makeable {
         fn add_edge_to_graph(graph: &mut ResourceGraph, start: GraphNode, weight: f32) {
             Self::add_node_to_graph(graph);
             graph.add_edge_to::<Self>(start, weight);
+        }
+
+        fn production_time(state: &mut GameState) -> f32 {
+            let input_time =
+                <<Self::Producer as Producer>::Input as Makeable>::production_time(state);
+            let producer = &mut state.producer::<Self::Producer>().producer;
+            let output_bundle_size = <Self::Producer as SingleOutputProducer>::Output::AMOUNT;
+            let craft_time = producer.craft_time() as f32
+                / (output_bundle_size as f32 * producer.available_parallelism() as f32);
+            input_time + craft_time
         }
     }
 
@@ -210,6 +249,10 @@ impl<R: SingleMakeable> Makeable for R {
     fn add_edge_to_graph(graph: &mut ResourceGraph, start: GraphNode, weight: f32) {
         <Self as SingleMakeable>::add_edge_to_graph(graph, start, weight);
     }
+
+    fn production_time(state: &mut GameState) -> f32 {
+        <Self as SingleMakeable>::production_time(state)
+    }
 }
 
 pub use single_makeable::*;
@@ -240,6 +283,11 @@ mod single_makeable {
         fn add_edge_to_graph(graph: &mut ResourceGraph, start: GraphNode, weight: f32) {
             Self::add_node_to_graph(graph);
             graph.add_edge_to::<Self>(start, weight);
+        }
+
+        /// Time to produce this item.
+        fn production_time(_state: &mut GameState) -> f32 {
+            0.
         }
     }
 

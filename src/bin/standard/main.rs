@@ -37,6 +37,7 @@ mod recipes;
 mod resources;
 mod runtime;
 mod scheduler;
+mod utils;
 pub use analysis::*;
 pub use crafting::*;
 pub use machine::*;
@@ -44,6 +45,7 @@ pub use recipes::*;
 pub use resources::*;
 pub use runtime::*;
 pub use scheduler::*;
+pub use utils::*;
 
 type GameMode = Standard;
 
@@ -97,8 +99,9 @@ pub struct Producers {
 pub trait ErasedProducer: Any {
     fn name(&self) -> String;
     fn available_parallelism(&self) -> u32;
+    fn craft_time(&self) -> u64;
     fn load(&self) -> usize;
-    fn report_load(&mut self, tick: &Tick) -> String;
+    fn report_load(&mut self, tick: &Tick) -> Option<String>;
     fn update(&mut self, tick: &Tick, waiters: &mut CallBackQueue);
     fn scale_up_if_needed(&mut self) -> Option<Box<dyn FnOnce(&mut GameState)>>;
 }
@@ -109,16 +112,14 @@ impl<P: Producer> ErasedProducer for ProducerWithQueue<P> {
     fn available_parallelism(&self) -> u32 {
         self.producer.available_parallelism()
     }
+    fn craft_time(&self) -> u64 {
+        self.producer.craft_time()
+    }
     fn load(&self) -> usize {
         self.queue.len()
     }
-    fn report_load(&mut self, tick: &Tick) -> String {
-        let load = self.load();
-        if let Some(s) = self.producer.report_load(tick) {
-            format!("{load} -- {s}")
-        } else {
-            load.to_string()
-        }
+    fn report_load(&mut self, tick: &Tick) -> Option<String> {
+        self.producer.report_load(tick)
     }
     fn update(&mut self, tick: &Tick, waiters: &mut CallBackQueue) {
         self.update(tick, waiters);

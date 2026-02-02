@@ -1,6 +1,7 @@
 use std::{any::Any, cmp::Reverse, collections::VecDeque, mem, ops::ControlFlow};
 
 use itertools::Itertools;
+use rustorio::territory::MINING_TICK_LENGTH;
 
 use crate::*;
 
@@ -206,6 +207,8 @@ pub trait Producer: Any + Sized {
 
     /// Count the number of producing entities (miners, assemblers, ..) available.
     fn available_parallelism(&self) -> u32;
+    /// The time it takes for a producing entity to make a single output.
+    fn craft_time(&self) -> u64;
 
     /// Detailed load reporting, if available.
     fn report_load(&mut self, _tick: &Tick) -> Option<String> {
@@ -260,6 +263,9 @@ impl<R: HandRecipe + ConstRecipe + Any> Producer for HandCrafter<R> {
     fn available_parallelism(&self) -> u32 {
         1
     }
+    fn craft_time(&self) -> u64 {
+        <R as Recipe>::TIME
+    }
 
     fn add_inputs(&mut self, _tick: &Tick, inputs: Self::Input) {
         self.inputs.push(inputs);
@@ -282,6 +288,9 @@ impl<Ore: ResourceType + Any> Producer for Territory<Ore> {
     }
     fn available_parallelism(&self) -> u32 {
         self.num_miners()
+    }
+    fn craft_time(&self) -> u64 {
+        MINING_TICK_LENGTH
     }
 
     fn add_inputs(&mut self, _tick: &Tick, _inputs: Self::Input) {}
@@ -325,6 +334,9 @@ where
     }
     fn available_parallelism(&self) -> u32 {
         self.count()
+    }
+    fn craft_time(&self) -> u64 {
+        <M::Recipe as Recipe>::TIME
     }
     fn report_load(&mut self, tick: &Tick) -> Option<String> {
         match self {
@@ -449,6 +461,9 @@ where
     }
     fn available_parallelism(&self) -> u32 {
         self.available.is_some() as u32
+    }
+    fn craft_time(&self) -> u64 {
+        0
     }
 
     fn add_inputs(&mut self, _tick: &Tick, _inputs: Self::Input) {}
