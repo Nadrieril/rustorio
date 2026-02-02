@@ -430,27 +430,6 @@ where
     }
 }
 
-/// Items that can be made use of many times (e.g. recipes).
-#[marker]
-pub trait Reusable {}
-
-impl<T: Technology> Reusable for T {}
-impl<T: Recipe> Reusable for T {}
-
-/// Token that indicates that the given reusable resource is available.
-pub struct Available<T: Reusable>(PhantomData<T>);
-
-impl<T: Reusable> Copy for Available<T> {}
-impl<T: Reusable> Clone for Available<T> {
-    fn clone(&self) -> Self {
-        Self(PhantomData)
-    }
-}
-
-/// Wrapper for resources that we only need to make once. The first time we query the resource will
-/// trigger the making of this, and subsequent times will reuse the already-produced resource.
-pub struct TheFirstTime<T: Reusable>(pub T);
-
 /// Producer that represents items that are produced only once.
 pub struct OnceMaker<O: Reusable> {
     is_started: bool,
@@ -503,32 +482,6 @@ where
         } else {
             done
         }
-    }
-}
-
-/// A container for a reusable resource. The `Available` token serves as access to the contained
-/// data.
-pub struct ReusableContainer<T> {
-    /// The reusable value, once we've built it.
-    val: Option<T>,
-}
-
-impl<T: Reusable> ReusableContainer<T> {
-    pub fn empty() -> Self {
-        Self { val: None }
-    }
-    pub fn available(&self) -> Option<Available<T>> {
-        self.val.as_ref().map(|_| Available(PhantomData))
-    }
-    pub fn get(&self, _: Available<T>) -> &T {
-        self.val.as_ref().unwrap()
-    }
-    pub fn take(&mut self, _: Available<T>) -> T {
-        self.val.take().unwrap()
-    }
-    pub fn set(&mut self, t: T) -> Available<T> {
-        self.val = Some(t);
-        Available(PhantomData)
     }
 }
 

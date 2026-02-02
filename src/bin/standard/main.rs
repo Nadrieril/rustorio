@@ -34,12 +34,14 @@ mod analysis;
 mod crafting;
 mod machine;
 mod recipes;
+mod resources;
 mod runtime;
 mod scheduler;
 pub use analysis::*;
 pub use crafting::*;
 pub use machine::*;
 pub use recipes::*;
+pub use resources::*;
 pub use runtime::*;
 pub use scheduler::*;
 
@@ -65,30 +67,6 @@ fn main() {
         (tick, v.0)
     }
     rustorio::play::<GameMode>(user_main);
-}
-
-/// A store of various resources.
-#[derive(Default)]
-pub struct Resources {
-    any: HashMap<TypeId, Box<dyn Any>>,
-}
-
-impl Resources {
-    fn or_insert_any<X: Any>(&mut self, f: impl FnOnce() -> X) -> &mut X {
-        let storage: &mut (dyn Any + 'static) = self
-            .any
-            .entry(TypeId::of::<X>())
-            .or_insert_with(|| Box::new(f()))
-            .as_mut();
-        storage.downcast_mut().unwrap()
-    }
-
-    pub fn resource<R: ResourceType + Any>(&mut self) -> &mut Resource<R> {
-        self.or_insert_any(|| Resource::<R>::new_empty())
-    }
-    pub fn reusable<T: Reusable + Any>(&mut self) -> &mut ReusableContainer<T> {
-        self.or_insert_any(|| ReusableContainer::empty())
-    }
 }
 
 impl Resources {
