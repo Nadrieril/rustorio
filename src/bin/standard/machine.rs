@@ -159,8 +159,18 @@ impl<M: Machine> MultiMachine<M> {
         match self {
             MultiMachine::NoMachine { outputs, .. } => outputs.pop(),
             MultiMachine::Present(machines) => {
-                for m in machines {
+                for (i, m) in machines.iter_mut().enumerate() {
                     if let Some(o) = m.pop_outputs(tick) {
+                        if m.input_load(tick) == 0 {
+                            // Attempt to steal work from other machines.
+                            for m in machines.iter_mut() {
+                                if m.input_load(tick) >= 2 {
+                                    let inputs = m.pop_inputs(tick).unwrap();
+                                    machines[i].add_inputs(tick, inputs);
+                                    break;
+                                }
+                            }
+                        }
                         return Some(o);
                     }
                 }
