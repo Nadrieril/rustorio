@@ -179,10 +179,7 @@ impl Resources {
     ) -> &mut ProducerWithQueue<HandCrafter<R>> {
         self.or_insert_producer(|| HandCrafter::<R>::default())
     }
-    pub fn once_maker<O: Clone + Any + Reusable>(&mut self) -> &mut ProducerWithQueue<OnceMaker<O>>
-    where
-        TheFirstTime<O>: Makeable,
-    {
+    pub fn once_maker<O: OnceMakeable + Any>(&mut self) -> &mut ProducerWithQueue<OnceMaker<O>> {
         self.or_insert_producer(|| OnceMaker::<O>::default())
     }
 }

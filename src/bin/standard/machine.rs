@@ -233,7 +233,7 @@ pub trait Producer: Any + Sized {
 
     /// Schedule the addition of a new producing entity of this type. This is called when the load
     /// becomes too high compared to the available parallelism.
-    fn scale_up(&self, _p: Priority, _done: StateSink<()>) -> StateSink<()> {
+    fn scale_up(&mut self, _p: Priority, _done: StateSink<()>) -> StateSink<()> {
         StateSink::from_fn(|_state, ()| ())
     }
     /// Trigger a scaling up. This ensures we don't scale up many times in parallel.
@@ -298,7 +298,7 @@ where
         self.resources(tick).bundle().ok().map(|x| (x,))
     }
 
-    fn scale_up(&self, p: Priority, done: StateSink<()>) -> StateSink<()> {
+    fn scale_up(&mut self, p: Priority, done: StateSink<()>) -> StateSink<()> {
         let num_miners = self.num_miners();
         let max_miners = self.max_miners();
         StateSink::from_fn(move |state, ()| {
@@ -355,7 +355,7 @@ where
         self.poll(tick)
     }
 
-    fn scale_up(&self, p: Priority, done: StateSink<()>) -> StateSink<()> {
+    fn scale_up(&mut self, p: Priority, done: StateSink<()>) -> StateSink<()> {
         StateSink::from_fn(move |state, ()| {
             let add_machine = done.map(|state, machine: M| {
                 state.resources.machine().producer.add(&state.tick, machine);
@@ -430,6 +430,13 @@ where
     }
 }
 
+/// Items that can be made use of many times (e.g. recipes).
+#[marker]
+pub trait Reusable {}
+
+impl<T: Technology> Reusable for T {}
+impl<T: Recipe> Reusable for T {}
+
 /// Token that indicates that the given reusable resource is available.
 pub struct Available<T: Reusable>(PhantomData<T>);
 
@@ -439,13 +446,6 @@ impl<T: Reusable> Clone for Available<T> {
         Self(PhantomData)
     }
 }
-
-/// Items that can be made use of many times (e.g. recipes).
-#[marker]
-pub trait Reusable {}
-
-impl<T: Technology> Reusable for T {}
-impl<T: Recipe> Reusable for T {}
 
 /// Wrapper for resources that we only need to make once. The first time we query the resource will
 /// trigger the making of this, and subsequent times will reuse the already-produced resource.
@@ -465,10 +465,9 @@ impl<O: Reusable> Default for OnceMaker<O> {
     }
 }
 
-impl<O: Clone + Any> Producer for OnceMaker<O>
+impl<O: Any> Producer for OnceMaker<O>
 where
-    O: Reusable,
-    TheFirstTime<O>: Makeable,
+    O: OnceMakeable,
 {
     type Input = ();
     type Output = Available<O>;
@@ -490,20 +489,20 @@ where
         self.available.clone()
     }
 
-    fn scale_up(&self, p: Priority, done: StateSink<()>) -> StateSink<()> {
-        StateSink::from_fn(move |state, ()| {
-            let this = &mut Self::get_ref(&mut state.resources).producer;
-            if !this.is_started {
-                this.is_started = true;
-                let produce = done.map(|state, TheFirstTime(o)| {
-                    let available = state.resources.reusable().set(o);
-                    Self::get_ref(&mut state.resources).producer.available = Some(available);
+    fn scale_up(&mut self, p: Priority, done: StateSink<()>) -> StateSink<()> {
+        if !self.is_started {
+            self.is_started = true;
+            StateSink::from_fn(move |state, ()| {
+                let produce = done.map(|state, inputs| {
+                    let o = <O as OnceMakeable>::make_from_input(state, inputs);
+                    let token = state.resources.reusable().set(o);
+                    Self::get_ref(&mut state.resources).producer.available = Some(token);
                 });
                 state.make_to(p, produce);
-            } else {
-                done.give(state, ());
-            }
-        })
+            })
+        } else {
+            done
+        }
     }
 }
 

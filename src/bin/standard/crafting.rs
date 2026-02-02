@@ -252,8 +252,7 @@ mod single_makeable {
     }
     impl<R> SingleMakeable for Furnace<R>
     where
-        R: FurnaceRecipe + Recipe + Copy,
-        Available<R>: Makeable,
+        R: FurnaceRecipe + OnceMakeable + Copy,
     {
         type Input = (Available<R>, Bundle<Iron, 10>);
 
@@ -264,8 +263,7 @@ mod single_makeable {
     }
     impl<R> SingleMakeable for Assembler<R>
     where
-        R: AssemblerRecipe + Recipe + Copy,
-        Available<R>: Makeable,
+        R: AssemblerRecipe + OnceMakeable + Copy,
     {
         type Input = (Available<R>, Bundle<Iron, 6>, Bundle<CopperWire, 12>);
 
@@ -274,8 +272,9 @@ mod single_makeable {
             Assembler::build(&state.tick, r, copper_wire, iron)
         }
     }
-    impl<T: Technology> SingleMakeable for Lab<T>
+    impl<T> SingleMakeable for Lab<T>
     where
+        T: Technology,
         Available<T>: Makeable,
     {
         type Input = (Available<T>, Bundle<Iron, 20>, Bundle<Copper, 15>);
@@ -286,50 +285,14 @@ mod single_makeable {
         }
     }
 
-    impl SingleMakeable for Available<SteelTechnology> {
-        type Input = ();
-        fn make_from_input(state: &mut GameState, _input: Self::Input) -> Self {
-            state.resources.reusable().available().unwrap()
-        }
-    }
-    impl SingleMakeable for Available<PointsTechnology> {
-        // The steel smelting recipe is because it also sets up the points tech.
-        type Input = Available<SteelSmelting>;
-        fn make_from_input(state: &mut GameState, _input: Self::Input) -> Self {
-            state.resources.reusable().available().unwrap()
-        }
-    }
-
-    impl SingleMakeable for TheFirstTime<SteelSmelting> {
-        type Input = (
-            Available<SteelTechnology>,
-            Bundle<ResearchPoint<SteelTechnology>, 20>,
-        );
-
-        fn make_from_input(
-            state: &mut GameState,
-            (steel_tech, research_points): Self::Input,
-        ) -> Self {
-            let steel_tech: SteelTechnology = state.resources.reusable().take(steel_tech);
-            let (steel_smelting, points_tech) = steel_tech.research(research_points);
-            let pqw = state.resources.machine::<Lab<SteelTechnology>>();
-            assert_eq!(pqw.queue.len(), 0);
-            let lab = pqw
-                .producer
-                .take_map(|lab| lab.change_technology(&points_tech).unwrap());
-            println!("changing the labs to `PointsTechnology`");
-            *state.resources.machine() = ProducerWithQueue::new(lab);
-            state.resources.reusable().set(points_tech);
-            TheFirstTime(steel_smelting)
-        }
-    }
-    impl SingleMakeable for Available<SteelSmelting> {
-        type Input = TheFirstTime<SteelSmelting>;
+    impl<T: OnceMakeable> SingleMakeable for Available<T> {
+        type Input = <T as OnceMakeable>::Input;
 
         fn make_to(state: &mut GameState, p: Priority, sink: StateSink<Self>) {
-            // If we let scaling up happen automatically, we apparently lose ticks :(
-            state.scale_up::<OnceMaker<SteelSmelting>>(p);
-            state.produce_to_state_sink::<OnceMaker<SteelSmelting>>(p, sink);
+            match state.resources.reusable().available() {
+                Some(token) => sink.give(state, token),
+                None => T::trigger_make(state, p, sink),
+            }
         }
 
         fn make_from_input(_state: &mut GameState, _input: Self::Input) -> Self {
@@ -337,61 +300,118 @@ mod single_makeable {
         }
     }
 
-    impl SingleMakeable for TheFirstTime<PointRecipe> {
-        type Input = (
-            Available<PointsTechnology>,
-            Bundle<ResearchPoint<PointsTechnology>, 50>,
-        );
-
-        fn make_from_input(
-            state: &mut GameState,
-            (points_tech, research_points): Self::Input,
-        ) -> Self {
-            let points_tech: PointsTechnology = state.resources.reusable().take(points_tech);
-            let points_recipe = points_tech.research(research_points);
-            TheFirstTime(points_recipe)
-        }
-    }
-    impl SingleMakeable for Available<PointRecipe> {
-        type Input = TheFirstTime<PointRecipe>;
-
-        fn make_to(state: &mut GameState, p: Priority, sink: StateSink<Self>) {
-            // If we let scaling up happen automatically, we apparently lose ticks :(
-            state.scale_up::<OnceMaker<PointRecipe>>(p);
-            state.produce_to_state_sink::<OnceMaker<PointRecipe>>(p, sink);
-        }
-
-        fn make_from_input(_state: &mut GameState, _input: Self::Input) -> Self {
-            unreachable!()
-        }
-    }
-
-    impl<T: BaseRecipe + Any> SingleMakeable for Available<T> {
-        type Input = ();
-        fn make_from_input(state: &mut GameState, _: ()) -> Self {
-            state.resources.reusable().set(T::MAKE)
-        }
-    }
-
-    pub use const_makeable::BaseRecipe;
-    mod const_makeable {
+    pub use once_makeable::*;
+    mod once_makeable {
         use crate::*;
 
-        pub trait BaseRecipe: Recipe + Copy {
-            const MAKE: Self;
+        /// Items that can be made once and reused.
+        pub trait OnceMakeable: Sized + Reusable + Any {
+            type Input: Makeable;
+
+            fn trigger_make(state: &mut GameState, p: Priority, sink: StateSink<Available<Self>>) {
+                // If we let scaling up happen automatically, we apparently lose ticks :(
+                state.scale_up::<OnceMaker<Self>>(p);
+                state.produce_to_state_sink::<OnceMaker<Self>>(p, sink);
+            }
+
+            fn make_from_input(state: &mut GameState, input: Self::Input) -> Self;
         }
 
-        impl BaseRecipe for IronSmelting {
-            const MAKE: Self = IronSmelting;
+        impl OnceMakeable for SteelTechnology {
+            type Input = ();
+
+            fn make_from_input(_state: &mut GameState, _input: Self::Input) -> Self {
+                unreachable!("available from the start")
+            }
         }
-        impl BaseRecipe for CopperSmelting {
-            const MAKE: Self = CopperSmelting;
+
+        impl OnceMakeable for SteelSmelting {
+            type Input = (
+                Available<SteelTechnology>,
+                Bundle<ResearchPoint<SteelTechnology>, 20>,
+            );
+
+            fn make_from_input(
+                state: &mut GameState,
+                (steel_tech, research_points): Self::Input,
+            ) -> Self {
+                let steel_tech: SteelTechnology = state.resources.reusable().take(steel_tech);
+                let (steel_smelting, points_tech) = steel_tech.research(research_points);
+                let pqw = state.resources.machine::<Lab<SteelTechnology>>();
+                assert_eq!(pqw.queue.len(), 0);
+                let lab = pqw
+                    .producer
+                    .take_map(|lab| lab.change_technology(&points_tech).unwrap());
+                println!("changing the labs to `PointsTechnology`");
+                *state.resources.machine() = ProducerWithQueue::new(lab);
+                state.resources.reusable().set(points_tech);
+                steel_smelting
+            }
         }
-        impl BaseRecipe for CopperWireRecipe {
-            const MAKE: Self = CopperWireRecipe;
+
+        impl OnceMakeable for PointsTechnology {
+            type Input = Available<SteelSmelting>;
+            fn trigger_make(state: &mut GameState, p: Priority, sink: StateSink<Available<Self>>) {
+                state.make_to(
+                    p,
+                    sink.map(|state, _: Available<SteelSmelting>| {
+                        // The steel smelting recipe also sets up the points tech.
+                        state.resources.reusable().available().unwrap()
+                    }),
+                );
+            }
+            fn make_from_input(_state: &mut GameState, _input: Self::Input) -> Self {
+                panic!()
+            }
         }
-        impl BaseRecipe for ElectronicCircuitRecipe {
-            const MAKE: Self = ElectronicCircuitRecipe;
+
+        impl OnceMakeable for PointRecipe {
+            type Input = (
+                Available<PointsTechnology>,
+                Bundle<ResearchPoint<PointsTechnology>, 50>,
+            );
+
+            fn make_from_input(
+                state: &mut GameState,
+                (points_tech, research_points): Self::Input,
+            ) -> Self {
+                let points_tech: PointsTechnology = state.resources.reusable().take(points_tech);
+                let points_recipe = points_tech.research(research_points);
+                points_recipe
+            }
+        }
+
+        impl<T: BaseRecipe + Any> OnceMakeable for T {
+            type Input = ();
+            fn trigger_make(state: &mut GameState, _p: Priority, sink: StateSink<Available<Self>>) {
+                let token = state.resources.reusable().set(T::MAKE);
+                sink.give(state, token);
+            }
+            fn make_from_input(_state: &mut GameState, _: ()) -> Self {
+                unreachable!()
+            }
+        }
+
+        pub use const_makeable::BaseRecipe;
+        mod const_makeable {
+            use crate::*;
+
+            pub trait BaseRecipe: Recipe + Copy {
+                const MAKE: Self;
+            }
+
+            impl BaseRecipe for IronSmelting {
+                const MAKE: Self = IronSmelting;
+            }
+            impl BaseRecipe for CopperSmelting {
+                const MAKE: Self = CopperSmelting;
+            }
+            impl BaseRecipe for CopperWireRecipe {
+                const MAKE: Self = CopperWireRecipe;
+            }
+            impl BaseRecipe for ElectronicCircuitRecipe {
+                const MAKE: Self = ElectronicCircuitRecipe;
+            }
         }
     }
 }
