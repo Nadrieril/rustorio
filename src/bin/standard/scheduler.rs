@@ -212,6 +212,15 @@ impl CallBackQueue {
 }
 
 impl GameState {
+    pub fn handle_via_state_sink<T: Any>(
+        &mut self,
+        f: impl FnOnce(&mut GameState, StateSink<T>),
+    ) -> WakeHandle<T> {
+        let (h, sink) = WakeHandle::make_pipe();
+        f(self, sink);
+        h
+    }
+
     pub fn handle_via_sink<T: Any>(
         &mut self,
         f: impl FnOnce(&mut GameState, Sink<T>),

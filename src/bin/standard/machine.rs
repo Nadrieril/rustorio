@@ -589,14 +589,14 @@ impl GameState {
     }
 
     pub fn add_machine<M: Machine + Makeable>(&mut self, p: Priority) -> WakeHandle<()> {
-        self.handle_via_sink(|state, sink| {
+        self.handle_via_state_sink(|state, sink| {
             // self.scale_up::<MultiMachine<M>>(p)
             // TODO: If we use `trigger_scale_up` then we lose some parallelism :(
             state
                 .producers
                 .machine::<M>()
                 .producer
-                .scale_up(p, sink.with_gamestate())
+                .scale_up(p, sink)
                 .give(state, ())
         })
     }
