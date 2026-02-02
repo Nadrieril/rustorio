@@ -2,15 +2,6 @@ use std::any::Any;
 
 use crate::*;
 
-pub trait SingleOutputMachine:
-    Machine<Recipe: ConstRecipe<BundledOutputs = (Self::Output,)>>
-{
-    type Output;
-}
-impl<M: Machine<Recipe: ConstRecipe<BundledOutputs = (O,)>>, O> SingleOutputMachine for M {
-    type Output = O;
-}
-
 /// Set of resources that can be automatically crafted.
 pub trait Makeable: Any + Sized {
     fn make_to(state: &mut GameState, p: Priority, sink: StateSink<Self>);
@@ -128,6 +119,14 @@ mod bundle_makeable {
         type Output;
     }
     impl<P: Producer<Output = (O,)>, O> SingleOutputProducer for P {
+        type Output = O;
+    }
+    pub trait SingleOutputMachine:
+        Machine<Recipe: ConstRecipe<BundledOutputs = (Self::Output,)>>
+    {
+        type Output;
+    }
+    impl<M: Machine<Recipe: ConstRecipe<BundledOutputs = (O,)>>, O> SingleOutputMachine for M {
         type Output = O;
     }
 
