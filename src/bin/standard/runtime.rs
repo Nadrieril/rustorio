@@ -6,11 +6,7 @@ use std::{
 use itertools::Itertools;
 use rustorio::Tick;
 
-use crate::{
-    ResourceGraph, Resources, StartingResources,
-    machine::AdvancedTick,
-    scheduler::{CallBackQueue, WakeHandle},
-};
+use crate::*;
 
 /// Wrapper to restrict mutable access.
 pub struct RestrictMut<T>(T);
@@ -44,6 +40,7 @@ pub struct GameState {
     pub tick: RestrictMut<Tick>,
     last_reported_tick: u64,
     pub resources: Resources,
+    pub producers: Producers,
     pub queue: CallBackQueue,
     pub graph: ResourceGraph,
 }
@@ -51,24 +48,23 @@ pub struct GameState {
 impl GameState {
     pub fn new(mut tick: Tick, starting_resources: StartingResources) -> Self {
         tick.log(false);
+        let (resources, producers) = Resources::new(starting_resources);
         GameState {
             tick: RestrictMut::new(tick),
             last_reported_tick: 0,
             queue: Default::default(),
-            resources: Resources::new(starting_resources),
+            resources,
+            producers,
             graph: Default::default(),
         }
     }
 
-    pub fn tick(&self) -> &Tick {
-        &self.tick
-    }
     pub fn tick_fwd(&mut self) {
         let mut_token = RestrictMutToken(()); // Only place where we create one.
 
         let tick_mut = self.tick.as_mut(mut_token);
         match self
-            .resources
+            .producers
             .with_hand_producers(|p| p.craft_by_hand_if_needed(tick_mut))
         {
             ControlFlow::Break(AdvancedTick) => {}
@@ -81,7 +77,7 @@ impl GameState {
 
     pub fn check_waiters(&mut self) {
         let mut scale_ups = vec![];
-        for m in self.resources.iter_producers() {
+        for m in self.producers.iter_producers() {
             m.update(&self.tick, &mut self.queue);
             if let Some(f) = m.scale_up_if_needed() {
                 scale_ups.push(f);
@@ -105,7 +101,7 @@ impl GameState {
 
         // TODO: how about add a machine if load too big? Clients are only waiting when the inputs
         // are ready so this isn't backpressure, it's a bottleneck.
-        let r = &mut self.resources;
+        let r = &mut self.producers;
         let loads = r
             .iter_producers()
             .sorted_by_key(|p| p.name())

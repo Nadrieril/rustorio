@@ -200,7 +200,7 @@ pub trait Producer: Any + Sized {
     type Output: Any;
     fn name() -> String;
 
-    fn get_ref(resources: &mut Resources) -> &mut ProducerWithQueue<Self>;
+    fn get_ref(producers: &mut Producers) -> &mut ProducerWithQueue<Self>;
 
     /// Count the number of producing entities (miners, assemblers, ..) available.
     fn available_parallelism(&self) -> u32;
@@ -221,7 +221,7 @@ pub trait Producer: Any + Sized {
     /// Turn a receiver of outputs into a receiver of inputs.
     fn feed(p: Priority, sink: Sink<Self::Output>) -> StateSink<Self::Input> {
         StateSink::from_fn(move |state, inputs| {
-            Self::get_ref(&mut state.resources).feed(
+            Self::get_ref(&mut state.producers).feed(
                 &state.tick,
                 &mut state.queue,
                 p,
@@ -240,10 +240,10 @@ pub trait Producer: Any + Sized {
     fn trigger_scale_up(p: Priority) -> Box<dyn FnOnce(&mut GameState)> {
         Box::new(move |state| {
             eprintln!("scaling up {}", type_name::<Self>());
-            let this = Self::get_ref(&mut state.resources);
+            let this = Self::get_ref(&mut state.producers);
             this.scaling_up += 1;
             let when_done = StateSink::from_fn(|state, ()| {
-                Self::get_ref(&mut state.resources).scaling_up -= 1;
+                Self::get_ref(&mut state.producers).scaling_up -= 1;
             });
             this.producer.scale_up(p, when_done).give(state, ());
         })
@@ -256,8 +256,8 @@ impl<R: HandRecipe + ConstRecipe + Any> Producer for HandCrafter<R> {
     fn name() -> String {
         type_name::<R>()
     }
-    fn get_ref(resources: &mut Resources) -> &mut ProducerWithQueue<Self> {
-        resources.hand_crafter()
+    fn get_ref(producers: &mut Producers) -> &mut ProducerWithQueue<Self> {
+        producers.hand_crafter()
     }
     fn available_parallelism(&self) -> u32 {
         1
@@ -283,8 +283,8 @@ where
     fn name() -> String {
         type_name::<Ore>()
     }
-    fn get_ref(resources: &mut Resources) -> &mut ProducerWithQueue<Self> {
-        resources.territory::<Ore>()
+    fn get_ref(producers: &mut Producers) -> &mut ProducerWithQueue<Self> {
+        producers.territory::<Ore>()
     }
     fn available_parallelism(&self) -> u32 {
         self.num_miners()
@@ -302,10 +302,10 @@ where
         let num_miners = self.num_miners();
         let max_miners = self.max_miners();
         StateSink::from_fn(move |state, ()| {
-            let this = Self::get_ref(&mut state.resources);
+            let this = Self::get_ref(&mut state.producers);
             if num_miners + this.scaling_up <= max_miners {
                 let add_miner = done.map(|state, miner: Miner| {
-                    Self::get_ref(&mut state.resources)
+                    Self::get_ref(&mut state.producers)
                         .producer
                         .add_miner(&state.tick, miner)
                         .unwrap();
@@ -325,8 +325,8 @@ where
     fn name() -> String {
         type_name::<M::Recipe>()
     }
-    fn get_ref(resources: &mut Resources) -> &mut ProducerWithQueue<Self> {
-        resources.machine::<M>()
+    fn get_ref(producers: &mut Producers) -> &mut ProducerWithQueue<Self> {
+        producers.machine::<M>()
     }
     fn available_parallelism(&self) -> u32 {
         self.count()
@@ -358,7 +358,7 @@ where
     fn scale_up(&mut self, p: Priority, done: StateSink<()>) -> StateSink<()> {
         StateSink::from_fn(move |state, ()| {
             let add_machine = done.map(|state, machine: M| {
-                state.resources.machine().producer.add(&state.tick, machine);
+                state.producers.machine().producer.add(&state.tick, machine);
             });
             state.make_to(p, add_machine);
         })
@@ -474,8 +474,8 @@ where
     fn name() -> String {
         type_name::<Self>()
     }
-    fn get_ref(resources: &mut Resources) -> &mut ProducerWithQueue<Self> {
-        resources.once_maker()
+    fn get_ref(producers: &mut Producers) -> &mut ProducerWithQueue<Self> {
+        producers.once_maker()
     }
     fn available_parallelism(&self) -> u32 {
         self.available.is_some() as u32
@@ -496,7 +496,7 @@ where
                 let produce = done.map(|state, inputs| {
                     let o = <O as OnceMakeable>::make_from_input(state, inputs);
                     let token = state.resources.reusable().set(o);
-                    Self::get_ref(&mut state.resources).producer.available = Some(token);
+                    Self::get_ref(&mut state.producers).producer.available = Some(token);
                 });
                 state.make_to(p, produce);
             })
@@ -640,7 +640,7 @@ impl GameState {
             // self.scale_up::<MultiMachine<M>>(p)
             // TODO: If we use `trigger_scale_up` then we lose some parallelism :(
             state
-                .resources
+                .producers
                 .machine::<M>()
                 .producer
                 .scale_up(p, sink.with_gamestate())

@@ -337,13 +337,13 @@ mod single_makeable {
             ) -> Self {
                 let steel_tech: SteelTechnology = state.resources.reusable().take(steel_tech);
                 let (steel_smelting, points_tech) = steel_tech.research(research_points);
-                let pqw = state.resources.machine::<Lab<SteelTechnology>>();
+                let pqw = state.producers.machine::<Lab<SteelTechnology>>();
                 assert_eq!(pqw.queue.len(), 0);
                 let lab = pqw
                     .producer
                     .take_map(|lab| lab.change_technology(&points_tech).unwrap());
                 println!("changing the labs to `PointsTechnology`");
-                *state.resources.machine() = ProducerWithQueue::new(lab);
+                *state.producers.machine() = ProducerWithQueue::new(lab);
                 state.resources.reusable().set(points_tech);
                 steel_smelting
             }

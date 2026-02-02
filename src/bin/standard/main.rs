@@ -71,6 +71,48 @@ fn main() {
 #[derive(Default)]
 pub struct Resources {
     any: HashMap<TypeId, Box<dyn Any>>,
+}
+
+impl Resources {
+    fn or_insert_any<X: Any>(&mut self, f: impl FnOnce() -> X) -> &mut X {
+        let storage: &mut (dyn Any + 'static) = self
+            .any
+            .entry(TypeId::of::<X>())
+            .or_insert_with(|| Box::new(f()))
+            .as_mut();
+        storage.downcast_mut().unwrap()
+    }
+
+    pub fn resource<R: ResourceType + Any>(&mut self) -> &mut Resource<R> {
+        self.or_insert_any(|| Resource::<R>::new_empty())
+    }
+    pub fn reusable<T: Reusable + Any>(&mut self) -> &mut ReusableContainer<T> {
+        self.or_insert_any(|| ReusableContainer::empty())
+    }
+}
+
+impl Resources {
+    fn new(starting_resources: StartingResources) -> (Resources, Producers) {
+        let StartingResources {
+            iron,
+            iron_territory,
+            copper_territory,
+            steel_technology,
+        } = starting_resources;
+
+        let mut resources = Resources::default();
+        let mut producers = Producers::default();
+        resources.resource().add(iron);
+        resources.reusable().set(steel_technology);
+        producers.add_territory(iron_territory);
+        producers.add_territory(copper_territory);
+        (resources, producers)
+    }
+}
+
+/// A store of various producers.
+#[derive(Default)]
+pub struct Producers {
     producers: IndexMap<TypeId, Box<dyn ErasedProducer>>,
 }
 
@@ -117,15 +159,7 @@ impl<P: HandProducer> ErasedHandProducer for ProducerWithQueue<P> {
     }
 }
 
-impl Resources {
-    fn or_insert_any<X: Any>(&mut self, f: impl FnOnce() -> X) -> &mut X {
-        let storage: &mut (dyn Any + 'static) = self
-            .any
-            .entry(TypeId::of::<X>())
-            .or_insert_with(|| Box::new(f()))
-            .as_mut();
-        storage.downcast_mut().unwrap()
-    }
+impl Producers {
     fn or_insert_producer<P: Producer>(
         &mut self,
         f: impl FnOnce() -> P,
@@ -152,13 +186,6 @@ impl Resources {
         self.producers.values_mut().map(|s| s.as_mut())
     }
 
-    pub fn resource<R: ResourceType + Any>(&mut self) -> &mut Resource<R> {
-        self.or_insert_any(|| Resource::<R>::new_empty())
-    }
-    pub fn reusable<T: Reusable + Any>(&mut self) -> &mut ReusableContainer<T> {
-        self.or_insert_any(|| ReusableContainer::empty())
-    }
-
     pub fn machine<M: Machine + Makeable>(&mut self) -> &mut ProducerWithQueue<MultiMachine<M>> {
         self.or_insert_producer(|| MultiMachine::<M>::default())
     }
@@ -181,24 +208,6 @@ impl Resources {
     }
     pub fn once_maker<O: OnceMakeable + Any>(&mut self) -> &mut ProducerWithQueue<OnceMaker<O>> {
         self.or_insert_producer(|| OnceMaker::<O>::default())
-    }
-}
-
-impl Resources {
-    fn new(starting_resources: StartingResources) -> Self {
-        let StartingResources {
-            iron,
-            iron_territory,
-            copper_territory,
-            steel_technology,
-        } = starting_resources;
-
-        let mut resources = Resources::default();
-        resources.resource().add(iron);
-        resources.reusable().set(steel_technology);
-        resources.add_territory(iron_territory);
-        resources.add_territory(copper_territory);
-        resources
     }
 
     pub fn with_hand_producers(
