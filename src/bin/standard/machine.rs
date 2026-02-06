@@ -586,7 +586,7 @@ impl<P: Producer> ProducerWithQueue<P> {
     /// Checks if scaling up may be needed. If so, return a function to be called on the game state
     /// to schedule a scale up.
     pub fn scale_up_if_needed(&mut self) -> Option<Box<dyn FnOnce(&mut GameState) -> bool>> {
-        let load = self.load();
+        let load = self.load() as u32;
         if load == 0 {
             return None;
         }
@@ -594,19 +594,45 @@ impl<P: Producer> ProducerWithQueue<P> {
         if parallelism >= self.producer.max_parallelism() {
             return None;
         }
-        if parallelism == 0 {
-            let p = self.queue.front().unwrap().1;
-            let p = Priority(p.0 + 1);
-            return Some(P::trigger_scale_up(p));
+        if parallelism != 0 {
+            if false {
+                // Lol why is the clever thing worse than the heuristic pulled out of my ass.
+                let craft_time = self.craft_time() as f32;
+                return Some(Box::new(move |state: &mut GameState| {
+                    let machine_crafting_time =
+                        <P::CraftingEntity as Makeable>::production_time(state);
+                    let this = state.producer::<P>();
+                    let load = load as f32;
+                    // Place ourselves in the hypothetical future where the current scaling up is
+                    // done.
+                    // let time_til_scaled_up = this.scaling_up as f32 * machine_crafting_time;
+                    // let items_crafted_while_scaling_up = time_til_scaled_up / craft_time;
+                    // if items_crafted_while_scaling_up >= load as f32 {
+                    //     return false;
+                    // }
+                    // let load_when_scaled_up = load as f32 - items_crafted_while_scaling_up;
+                    // let load = load_when_scaled_up;
+                    let time_left = |parallelism: u32| (load / parallelism as f32) * craft_time;
+                    let real_time_left = time_left(parallelism);
+                    let time_left_with_upscale = time_left(parallelism + 1);
+                    // Simple heuristic: if crafting an extra machine would take less time than the time won by
+                    // scaling up, scale up.
+                    if time_left_with_upscale + machine_crafting_time < real_time_left {
+                        let p = this.queue.front().unwrap().1;
+                        let p = Priority(p.0 + 1);
+                        P::trigger_scale_up(p)(state)
+                    } else {
+                        false
+                    }
+                }));
+            } else if load <= (parallelism + self.scaling_up * 5) * 4 {
+                return None;
+            }
         }
 
-        if load > (parallelism + self.scaling_up * 5) as usize * 4 {
-            let p = self.queue.front().unwrap().1;
-            let p = Priority(p.0 + 1);
-            Some(P::trigger_scale_up(p))
-        } else {
-            None
-        }
+        let p = self.queue.front().unwrap().1;
+        let p = Priority(p.0 + 1);
+        Some(P::trigger_scale_up(p))
     }
 
     /// If the producer has a non-empty queue and can't produce output automatically, craft by hand
