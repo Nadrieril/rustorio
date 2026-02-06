@@ -164,25 +164,35 @@ impl<M: Machine> MultiMachine<M> {
                     max_load = max(max_load, load);
                     total_load += load;
                 }
-                if min_load == 0 || max_load - min_load > 5 {
-                    // Average out the load.
-                    let average_load: u32 = total_load.div_ceil(machines.len() as u32);
-                    let mut above_average = vec![];
-                    for m in machines.iter_mut() {
-                        while m.input_load(tick) > average_load
+                if max_load - min_load > 1 {
+                    // We can always enforce `max - min <= 1` as follows: every machine gets either
+                    // `base_load` or `base_load + 1` inputs, and we arbitrarily give extra inputs
+                    // to earlier machines in the list, unless doing so would make a later machine
+                    // empty (which wastes ticks).
+                    let len = machines.len() as u32;
+                    let base_load = total_load / len;
+                    let remainder_load = total_load % len;
+                    // The load we chose for machine number `i`.
+                    let target_load = |i: usize| base_load + ((i as u32) < remainder_load) as u32;
+                    let mut extra_inputs = vec![];
+                    for (i, m) in machines.iter_mut().enumerate() {
+                        while let load = m.input_load(tick)
+                            && load > target_load(i)
+                            && load > 1 // never remove the only input of a machine
                             && let Some(input) = m.pop_inputs(tick)
                         {
-                            above_average.push(input);
+                            extra_inputs.push(input);
                         }
                     }
-                    for m in machines.iter_mut() {
-                        while m.input_load(tick) < average_load
-                            && let Some(input) = above_average.pop()
+                    for (i, m) in machines.iter_mut().enumerate() {
+                        while let load = m.input_load(tick)
+                            && load < target_load(i)
+                            && let Some(input) = extra_inputs.pop()
                         {
                             m.add_inputs(tick, input);
                         }
                     }
-                    assert_eq!(above_average.len(), 0);
+                    assert_eq!(extra_inputs.len(), 0);
                 }
             }
             MultiMachine::NoMachine { .. } | MultiMachine::Removed => {}
