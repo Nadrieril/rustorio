@@ -1,0 +1,3 @@
+[submodule "rustorio"]
+	path = rustorio
+	url = https://github.com/albertsgarde/rustorio
