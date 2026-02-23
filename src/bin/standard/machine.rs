@@ -25,8 +25,8 @@ pub fn type_name<T: Any>() -> String {
 
 pub trait Machine: Any {
     type Recipe: ConstRecipe;
-    fn inputs(&mut self, tick: &Tick) -> &mut <Self::Recipe as Recipe>::Inputs;
-    fn outputs(&mut self, tick: &Tick) -> &mut <Self::Recipe as Recipe>::Outputs;
+    fn inputs<'a>(&'a mut self, tick: &'a Tick) -> &'a mut <Self::Recipe as Recipe>::Inputs;
+    fn outputs<'a>(&'a mut self, tick: &'a Tick) -> &'a mut <Self::Recipe as Recipe>::Outputs;
 
     /// The number of input bundles currently in the machine.
     fn input_load(&mut self, tick: &Tick) -> u32 {
@@ -53,19 +53,19 @@ pub trait Machine: Any {
 
 impl<R: FurnaceRecipe + ConstRecipe + Any> Machine for Furnace<R> {
     type Recipe = R;
-    fn inputs(&mut self, tick: &Tick) -> &mut <R as Recipe>::Inputs {
+    fn inputs<'a>(&'a mut self, tick: &'a Tick) -> &'a mut <R as Recipe>::Inputs {
         self.inputs(tick)
     }
-    fn outputs(&mut self, tick: &Tick) -> &mut <R as Recipe>::Outputs {
+    fn outputs<'a>(&'a mut self, tick: &'a Tick) -> &'a mut <R as Recipe>::Outputs {
         self.outputs(tick)
     }
 }
 impl<R: AssemblerRecipe + ConstRecipe + Any> Machine for Assembler<R> {
     type Recipe = R;
-    fn inputs(&mut self, tick: &Tick) -> &mut <R as Recipe>::Inputs {
+    fn inputs<'a>(&'a mut self, tick: &'a Tick) -> &'a mut <R as Recipe>::Inputs {
         self.inputs(tick)
     }
-    fn outputs(&mut self, tick: &Tick) -> &mut <R as Recipe>::Outputs {
+    fn outputs<'a>(&'a mut self, tick: &'a Tick) -> &'a mut <R as Recipe>::Outputs {
         self.outputs(tick)
     }
 }
@@ -74,10 +74,10 @@ where
     TechRecipe<T>: ConstRecipe,
 {
     type Recipe = TechRecipe<T>;
-    fn inputs(&mut self, tick: &Tick) -> &mut <TechRecipe<T> as Recipe>::Inputs {
+    fn inputs<'a>(&'a mut self, tick: &'a Tick) -> &'a mut <TechRecipe<T> as Recipe>::Inputs {
         self.inputs(tick)
     }
-    fn outputs(&mut self, tick: &Tick) -> &mut <TechRecipe<T> as Recipe>::Outputs {
+    fn outputs<'a>(&'a mut self, tick: &'a Tick) -> &'a mut <TechRecipe<T> as Recipe>::Outputs {
         self.outputs(tick)
     }
 }
