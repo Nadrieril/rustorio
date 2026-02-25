@@ -28,7 +28,7 @@ pub use rustorio::{
     resources::{Copper, CopperOre, CopperWire, ElectronicCircuit, Iron, IronOre, Point, Steel},
     territory::{Miner, OreType, Territory},
 };
-pub use rustorio_engine::{recipe::RecipeEx, research::TechRecipe};
+pub use rustorio_engine::research::TechRecipe;
 
 mod analysis;
 mod crafting;

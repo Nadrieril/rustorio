@@ -82,13 +82,13 @@ impl<R1: ResourceType, const N1: u32, R2: ResourceType, const N2: u32> MultiBund
 }
 
 /// Trait to compute statically-counted inputs and outputs.
-pub trait ConstRecipe: RecipeEx + Any {
+pub trait ConstRecipe: Recipe + Any {
     type BundledInputs: MultiBundle<AsResource = Self::InputResources>;
     type BundledOutputs: MultiBundle<AsResource = Self::OutputResources>;
 }
 impl<R> ConstRecipe for R
 where
-    R: RecipeEx + Any,
+    R: Recipe + Any,
     R: Recipe<InputBundle: MultiBundle<AsResource = Self::InputResources>>,
     R: Recipe<OutputBundle: MultiBundle<AsResource = Self::OutputResources>>,
 {
