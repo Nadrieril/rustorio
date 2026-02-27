@@ -82,17 +82,17 @@ impl<R1: ResourceType, const N1: u32, R2: ResourceType, const N2: u32> MultiBund
 }
 
 /// Trait to compute statically-counted inputs and outputs.
-pub trait ConstRecipe: Recipe + Any {
-    type BundledInputs: MultiBundle<AsResource = Self::Inputs>;
-    type BundledOutputs: MultiBundle<AsResource = Self::Outputs>;
+pub trait ConstRecipe: RecipeEx + Any {
+    type BundledInputs: MultiBundle<AsResource = Self::InputResources>;
+    type BundledOutputs: MultiBundle<AsResource = Self::OutputResources>;
 }
 impl<R> ConstRecipe for R
 where
-    R: Recipe + Any,
-    R: RecipeEx<InputBundle: MultiBundle<AsResource = Self::Inputs>>,
-    R: RecipeEx<OutputBundle: MultiBundle<AsResource = Self::Outputs>>,
+    R: RecipeEx + Any,
+    R: Recipe<InputBundle: MultiBundle<AsResource = Self::InputResources>>,
+    R: Recipe<OutputBundle: MultiBundle<AsResource = Self::OutputResources>>,
 {
-    type BundledInputs = <R as RecipeEx>::InputBundle;
+    type BundledInputs = <R as Recipe>::InputBundle;
     // Correct for inconsistencies in tuple-wrapping single outputs.
-    type BundledOutputs = <<R as RecipeEx>::OutputBundle as MultiBundle>::AsTuple;
+    type BundledOutputs = <<R as Recipe>::OutputBundle as MultiBundle>::AsTuple;
 }
