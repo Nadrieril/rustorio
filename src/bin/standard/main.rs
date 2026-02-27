@@ -26,7 +26,7 @@ pub use rustorio::{
     },
     research::{PointsTechnology, RedScience, SteelTechnology},
     resources::{Copper, CopperOre, CopperWire, ElectronicCircuit, Iron, IronOre, Point, Steel},
-    territory::{Miner, Territory},
+    territory::{Miner, OreType, Territory},
 };
 pub use rustorio_engine::{recipe::RecipeEx, research::TechRecipe};
 
@@ -192,10 +192,10 @@ impl Producers {
     pub fn machine<M: Machine + Makeable>(&mut self) -> &mut ProducerWithQueue<MultiMachine<M>> {
         self.or_insert_producer(|| MultiMachine::<M>::default())
     }
-    pub fn add_territory<O: ResourceType + Any>(&mut self, t: Territory<O>) {
+    pub fn add_territory<O: OreType + Any>(&mut self, t: Territory<O>) {
         self.insert_producer(t);
     }
-    pub fn territory<O: ResourceType + Any>(&mut self) -> &mut ProducerWithQueue<Territory<O>> {
+    pub fn territory<O: OreType + Any>(&mut self) -> &mut ProducerWithQueue<Territory<O>> {
         self.get_producer()
     }
     pub fn hand_crafter<R: HandRecipe + ConstRecipe>(

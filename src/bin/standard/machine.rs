@@ -7,7 +7,6 @@ use std::{
 };
 
 use itertools::Itertools;
-use rustorio::territory::MINING_TICK_LENGTH;
 
 use crate::*;
 
@@ -335,7 +334,7 @@ impl<R: HandRecipe + ConstRecipe + Any> Producer for HandCrafter<R> {
     }
 }
 
-impl<Ore: ResourceType + Any> Producer for Territory<Ore> {
+impl<Ore: OreType + Any> Producer for Territory<Ore> {
     type Input = ();
     type Output = (Bundle<Ore, 1>,);
     type CraftingEntity = Miner;
@@ -353,7 +352,7 @@ impl<Ore: ResourceType + Any> Producer for Territory<Ore> {
         self.max_miners()
     }
     fn craft_time(&self) -> u64 {
-        MINING_TICK_LENGTH
+        Ore::MINING_TIME
     }
 
     fn add_inputs(&mut self, _tick: &Tick, _inputs: Self::Input) {}
@@ -454,7 +453,7 @@ where
         }
     }
 }
-impl<Ore: ResourceType + Any> HandProducer for Territory<Ore> {
+impl<Ore: OreType + Any> HandProducer for Territory<Ore> {
     fn can_craft_automatically(&self) -> bool {
         self.num_miners() > 0
     }
@@ -666,7 +665,7 @@ impl GameState {
         <P>::trigger_scale_up(p)(self);
     }
 
-    pub fn add_miner<Ore: ResourceType + Any>(&mut self, p: Priority) {
+    pub fn add_miner<Ore: OreType + Any>(&mut self, p: Priority) {
         self.scale_up::<Territory<Ore>>(p)
     }
 
